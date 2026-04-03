@@ -1,0 +1,46 @@
+name = "ai-github-digest"
+main = "index.js"
+compatibility_date = "2026-04-01"
+
+# Optional custom domain example:
+# [[routes]]
+# pattern = "digest.example.com"
+# custom_domain = true
+
+[triggers]
+# Cloudflare Cron 使用 UTC。04:00 UTC = 12:00 Asia/Hong_Kong
+crons = ["0 4 * * *"]
+
+[vars]
+EMAIL_FROM = "digest@example.com"
+EMAIL_TO = "you@example.com"
+REPORT_TIMEZONE = "Asia/Hong_Kong"
+MAX_PROJECTS = "15"
+GITHUB_SEARCH_PAGES = "2"
+LLM_MODEL = "your-model-name"
+DIGEST_OVERVIEW_MODEL = "your-overview-model"
+PROJECT_SUMMARY_MODEL = "your-project-model"
+REPEAT_COOLDOWN_DAYS = "5"
+REPEAT_WINDOW_DAYS = "14"
+BREAKOUT_STAR_DELTA = "120"
+JUYA_RSS_URL = "https://imjuya.github.io/juya-ai-daily/rss.xml"
+JUYA_CONTENT_LIMIT = "30000"
+
+[[kv_namespaces]]
+binding = "STATE"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+[[queues.producers]]
+binding = "DIGEST_QUEUE"
+queue = "ai-github-digest-jobs"
+
+[[queues.consumers]]
+queue = "ai-github-digest-jobs"
+max_batch_size = 1
+max_batch_timeout = 2
+max_retries = 3
+
+[[send_email]]
+name = "EMAIL_OUT"
+allowed_destination_addresses = ["you@example.com"]
+allowed_sender_addresses = ["digest@example.com"]

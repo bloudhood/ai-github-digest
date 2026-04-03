@@ -1,0 +1,24 @@
+{
+  "name": "ai-github-digest",
+  "version": "1.0.0",
+  "description": "基于 Cloudflare Workers 的 AI / GitHub 热门项目邮件系统",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "tail": "wrangler tail"
+  },
+  "keywords": [
+    "cloudflare-workers",
+    "github-trending",
+    "ai",
+    "email-digest",
+    "llm"
+  ],
+  "author": "khaiise",
+  "license": "MIT",
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+  }
+}

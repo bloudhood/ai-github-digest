@@ -1,0 +1,9 @@
+.wrangler/
+node_modules/
+.claude/
+*.local.toml
+.dev.vars
+.env
+.env.*
+dist/
+coverage/

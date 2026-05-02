@@ -127,6 +127,96 @@ const WEAK_TOPIC_TOKENS = new Set([
   "library", "libraries", "multi", "system", "systems", "platform", "platforms",
 ]);
 
+// --- CSS Constants --- //
+const COLORS = {
+  textDark: "#111827",
+  textMediumDark: "#374151",
+  textMuted: "#6b7280",
+  textLightMuted: "#9ca3af",
+  textLightAlt: "#4b5563",
+  backgroundLight: "#f3f4f6",
+  white: "#ffffff",
+  borderColor: "#e5e7eb",
+  heroGradientStart: "#0f172a",
+  heroGradientMid: "#1e3a8a",
+  heroGradientEnd: "#0f766e",
+  redLight: "#fee2e2",
+  redDark: "#991b1b",
+  greenLight: "#dcfce7",
+  greenDark: "#166534",
+  blueLight: "#dbeafe",
+  blueDark: "#1d4ed8",
+  purpleLight: "#ede9fe",
+  purpleDark: "#5b21b6",
+  yellowLight: "#fef9c3",
+  yellowDark: "#854d0e",
+  orangeLight: "#ffedd5",
+  orangeDark: "#9a3412",
+  lightBlueLight: "#e0f2fe",
+  lightBlueDark: "#075985",
+  purpleLightAlt: "#f3e8ff",
+  purpleDarkAlt: "#6b21a8",
+};
+
+const FONT_SIZES = {
+  xs: "12px",
+  sm: "13px",
+  base: "14px",
+  md: "15px",
+  lg: "18px",
+  xl: "28px",
+};
+
+const BORDER_RADIUS = {
+  default: "18px",
+  card: "18px",
+  section: "20px",
+  hero: "22px",
+  pill: "999px",
+  cardImage: "14px",
+};
+
+const LINE_HEIGHTS = {
+  loose: "1.8",
+  normal: "1.7",
+  tight: "1.45",
+  title: "1.35",
+};
+
+const FONT_WEIGHTS = {
+  normal: "400",
+  medium: "600",
+  bold: "700",
+  extrabold: "800",
+};
+
+const SPACING = {
+  micro: "1px",
+  xs: "4px",
+  sm: "8px",
+  md: "10px",
+  lg: "12px",
+  xl: "14px",
+  xxl: "18px",
+  xxxl: "20px",
+  xxxxl: "24px",
+  xxxxxl: "28px",
+  xxxxxxl: "40px",
+};
+
+// Generic style builder for common properties
+function createCssProps(props) {
+  return Object.entries(props)
+    .filter(([, value]) => value !== undefined && value !== null)
+    .map(([key, value]) => `${kebabCase(key)}:${value};`)
+    .join("");
+}
+
+function kebabCase(str) {
+  return str.replace(/([a-z0-9]|(?=[A-Z]))([A-Z])/g, '$1-$2').toLowerCase();
+}
+// --- End CSS Constants --- //
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -3812,60 +3902,138 @@ function escapeAttribute(value) {
 }
 
 function pageStyle() {
-  return "margin:0;padding:0;background:#f3f4f6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#111827;";
+  return createCssProps({
+    margin: 0,
+    padding: 0,
+    background: COLORS.backgroundLight,
+    fontFamily: "-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif",
+    color: COLORS.textDark,
+  });
 }
 
 function containerStyle() {
-  return "max-width:720px;margin:0 auto;padding:24px 12px 40px 12px;";
+  return createCssProps({
+    maxWidth: "720px",
+    margin: "0 auto",
+    padding: `${SPACING.xxxxl} ${SPACING.lg} ${SPACING.xxxxxxl} ${SPACING.lg}`,
+  });
 }
 
 function heroStyle() {
-  return "background:linear-gradient(135deg,#0f172a 0%,#1e3a8a 55%,#0f766e 100%);padding:28px 24px;border-radius:22px;color:#ffffff;box-shadow:0 14px 40px rgba(15,23,42,.18);";
+  return createCssProps({
+    background: `linear-gradient(135deg,${COLORS.heroGradientStart} 0%,${COLORS.heroGradientMid} 55%,${COLORS.heroGradientEnd} 100%)`,
+    padding: `${SPACING.xxxxxl} ${SPACING.xxxxl}`,
+    borderRadius: BORDER_RADIUS.hero,
+    color: COLORS.white,
+    boxShadow: "0 14px 40px rgba(15,23,42,.18)",
+  });
 }
 
 function eyebrowStyle() {
-  return "font-size:12px;letter-spacing:.12em;text-transform:uppercase;opacity:.78;margin-bottom:10px;";
+  return createCssProps({
+    fontSize: FONT_SIZES.xs,
+    letterSpacing: ".12em",
+    textTransform: "uppercase",
+    opacity: ".78",
+    marginBottom: SPACING.md,
+  });
 }
 
 function titleStyle() {
-  return "margin:0;font-size:28px;line-height:1.35;font-weight:800;";
+  return createCssProps({
+    margin: 0,
+    fontSize: FONT_SIZES.xl,
+    lineHeight: LINE_HEIGHTS.title,
+    fontWeight: FONT_WEIGHTS.extrabold,
+  });
 }
 
 function metaStyle() {
-  return "margin-top:10px;font-size:13px;opacity:.8;";
+  return createCssProps({
+    marginTop: SPACING.md,
+    fontSize: FONT_SIZES.sm,
+    opacity: ".8",
+  });
 }
 
 function sectionStyle() {
-  return "margin-top:18px;background:#ffffff;border-radius:20px;padding:20px;box-shadow:0 10px 28px rgba(15,23,42,.08);";
+  return createCssProps({
+    marginTop: SPACING.xxl,
+    background: COLORS.white,
+    borderRadius: BORDER_RADIUS.section,
+    padding: SPACING.xxxl,
+    boxShadow: "0 10px 28px rgba(15,23,42,.08)",
+  });
 }
 
 function sectionTitleStyle() {
-  return "font-size:18px;font-weight:800;color:#111827;margin-bottom:14px;";
+  return createCssProps({
+    fontSize: FONT_SIZES.lg,
+    fontWeight: FONT_WEIGHTS.extrabold,
+    color: COLORS.textDark,
+    marginBottom: SPACING.xl,
+  });
 }
 
 function cardStyle(options = {}) {
-  const padding = options.padding || "18px";
-  return `background:#f8fafc;border:1px solid #e5e7eb;border-radius:18px;padding:${padding};margin-top:14px;overflow:hidden;`;
+  const padding = options.padding || SPACING.xxl;
+  return createCssProps({
+    background: "#f8fafc", // A slightly lighter background for cards
+    border: `${SPACING.micro} solid ${COLORS.borderColor}`,
+    borderRadius: BORDER_RADIUS.card,
+    padding: padding,
+    marginTop: SPACING.xl,
+    overflow: "hidden",
+  });
 }
 
 function mutedTextStyle() {
-  return "font-size:14px;color:#6b7280;line-height:1.7;";
+  return createCssProps({
+    fontSize: FONT_SIZES.base,
+    color: COLORS.textMuted,
+    lineHeight: LINE_HEIGHTS.normal,
+  });
 }
 
 function cardTitleStyle() {
-  return "font-size:18px;font-weight:800;color:#111827;line-height:1.45;margin:0 0 10px 0;";
+  return createCssProps({
+    fontSize: FONT_SIZES.lg,
+    fontWeight: FONT_WEIGHTS.extrabold,
+    color: COLORS.textDark,
+    lineHeight: LINE_HEIGHTS.tight,
+    margin: `0 0 ${SPACING.md} 0`,
+  });
 }
 
 function paragraphStyle() {
-  return "font-size:15px;line-height:1.8;color:#374151;margin-top:8px;";
+  return createCssProps({
+    fontSize: FONT_SIZES.md,
+    lineHeight: LINE_HEIGHTS.loose,
+    color: COLORS.textMediumDark,
+    marginTop: SPACING.sm,
+  });
 }
 
 function metaRowStyle() {
-  return "font-size:14px;color:#4b5563;font-weight:600;margin-top:4px;";
+  return createCssProps({
+    fontSize: FONT_SIZES.base,
+    color: COLORS.textLightAlt,
+    fontWeight: FONT_WEIGHTS.medium,
+    marginTop: SPACING.xs,
+  });
 }
 
 function buttonStyle(bg, color) {
-  return `display:inline-block;padding:10px 14px;border-radius:999px;background:${bg};color:${color};text-decoration:none;font-size:13px;font-weight:700;`;
+  return createCssProps({
+    display: "inline-block",
+    padding: `${SPACING.md} ${SPACING.xl}`,
+    borderRadius: BORDER_RADIUS.pill,
+    background: bg,
+    color: color,
+    textDecoration: "none",
+    fontSize: FONT_SIZES.sm,
+    fontWeight: FONT_WEIGHTS.bold,
+  });
 }
 
 function pillStyle(actionText) {

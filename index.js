@@ -24,6 +24,12 @@ const DEFAULT_REPEAT_WINDOW_DAYS = 14;
 const DEFAULT_BREAKOUT_STAR_DELTA = 120;
 const DEFAULT_JUYA_RSS_URL = "https://imjuya.github.io/juya-ai-daily/rss.xml";
 const DEFAULT_JUYA_CONTENT_LIMIT = 30000;
+const DEFAULT_AIHOT_ITEMS_URL = "https://aihot.virxact.com/api/public/items?mode=selected";
+const DEFAULT_AIHOT_HOME_URL = "https://aihot.virxact.com/feed.xml";
+const DEFAULT_AIHOT_ITEMS_TAKE = 30;
+const DEFAULT_AIHOT_MERGED_LIMIT = 8;
+const DEFAULT_AIHOT_LOOKBACK_HOURS = 36;
+const DEFAULT_AIHOT_TIMEOUT_MS = 4500;
 const DEFAULT_AUTHENTICITY_THRESHOLD = 12;
 const DEFAULT_TOPIC_RELEVANCE_MAX = 15;
 const DEFAULT_RELEASE_LOOKBACK_HOURS = 72;
@@ -113,6 +119,13 @@ const OFFICIAL_UPDATE_FEEDS = [
     keywordHints: ["agent", "workflow", "tool", "sdk"],
   },
 ];
+const AIHOT_CATEGORY_LABELS = {
+  "ai-models": "模型发布/更新",
+  "ai-products": "产品发布/更新",
+  industry: "行业动态",
+  paper: "论文研究",
+  tip: "技巧与观点",
+};
 const AI_DOMAIN_TERMS = [
   "ai", "agent", "agents", "llm", "llms", "model", "models", "prompt", "prompts", "rag",
   "mcp", "codex", "claude", "chatgpt", "gpt", "openai", "anthropic", "gemini", "deepseek",
@@ -386,19 +399,23 @@ async function runDigest(env, options) {
     const previousSnapshot = await getJson(env.STATE, OBSERVED_SNAPSHOT_KEY, deliveredSnapshot);
     const deliveryHistory = normalizeDeliveryHistory(await getJson(env.STATE, DELIVERY_HISTORY_KEY, null));
     const juyaContext = await fetchJuyaDigest(env, deliveryHistory, now, force);
-    const [officialResult, socialResult] = await Promise.allSettled([
+    const [aihotResult, officialResult, socialResult] = await Promise.allSettled([
+      fetchAihotUpdates(env, now, juyaContext),
       isOfficialUpdatesEnabled(env)
         ? fetchOfficialUpdates(env, now, juyaContext)
         : Promise.resolve({ status: "disabled", items: [], sources: [] }),
       fetchSocialTrends(env),
     ]);
+    const aihotContext = aihotResult.status === "fulfilled"
+      ? aihotResult.value
+      : { status: "fetch_failed", items: [], error: formatError(aihotResult.reason) };
     const officialContext = officialResult.status === "fulfilled"
       ? officialResult.value
       : { status: "fetch_failed", items: [], sources: [] };
     const socialContext = socialResult.status === "fulfilled"
       ? socialResult.value
       : { status: "fetch_failed", items: [] };
-    const newsContext = mergeNewsContexts(juyaContext, officialContext, socialContext);
+    const newsContext = mergeNewsContexts(juyaContext, aihotContext, officialContext, socialContext);
     const searchPlans = buildSearchPlans(now);
     const candidates = await collectCandidates(env, searchPlans);
     const ranked = rankCandidates(candidates, previousSnapshot, now, newsContext, env);
@@ -608,6 +625,10 @@ function getBreakoutStarDelta(env) {
 
 function getJuyaContentLimit(env) {
   return clampInteger(env.JUYA_CONTENT_LIMIT, DEFAULT_JUYA_CONTENT_LIMIT, 2000, 30000);
+}
+
+function getAihotItemsTake(env) {
+  return clampInteger(env.AIHOT_ITEMS_TAKE, DEFAULT_AIHOT_ITEMS_TAKE, 1, 50);
 }
 
 function getAuthenticityThreshold(env) {
@@ -1652,9 +1673,15 @@ function updateFamilySelectionState(profile, familyState) {
   return next;
 }
 
-function mergeNewsContexts(juyaContext, officialContext, socialContext) {
+function mergeNewsContexts(juyaContext, aihotContext, officialContext, socialContext) {
+  const mergedNewsContext = mergeAihotItemsIntoNewsContext(
+    juyaContext,
+    aihotContext && Array.isArray(aihotContext.items) ? aihotContext.items : [],
+  );
   return {
-    ...(juyaContext || {}),
+    ...mergedNewsContext,
+    aihot_fetch_status: aihotContext && aihotContext.status ? aihotContext.status : "empty",
+    aihot_error: aihotContext && aihotContext.error ? aihotContext.error : null,
     official_status: officialContext && officialContext.status ? officialContext.status : "empty",
     official_updates: officialContext && Array.isArray(officialContext.items) ? officialContext.items : [],
     official_sources: officialContext && Array.isArray(officialContext.sources) ? officialContext.sources : [],
@@ -1662,6 +1689,198 @@ function mergeNewsContexts(juyaContext, officialContext, socialContext) {
     social_platforms: socialContext && Array.isArray(socialContext.platforms) ? socialContext.platforms : [],
     social_status: socialContext ? socialContext.status : "disabled",
   };
+}
+
+async function fetchAihotUpdates(env, now, juyaContext) {
+  const url = buildAihotItemsUrl(env);
+  const headers = {
+    "user-agent": "ai-github-digest-worker",
+    "accept": "application/json",
+  };
+
+  try {
+    const response = await fetchWithTimeout(url, { headers }, DEFAULT_AIHOT_TIMEOUT_MS);
+    if (!response.ok) {
+      throw new Error(`AI HOT fetch failed (${response.status})`);
+    }
+
+    const data = await response.json();
+    const juyaTitles = collectJuyaTitlesForDedupe(juyaContext);
+    const items = normalizeAihotItemsForNews(Array.isArray(data && data.items) ? data.items : [])
+      .filter((item) => isRecentEnough(item.published_at, now, DEFAULT_AIHOT_LOOKBACK_HOURS))
+      .filter((item) => !hasEquivalentNewsTitle(juyaTitles, item.title));
+
+    return {
+      status: items.length ? "ok" : "empty",
+      items,
+    };
+  } catch (error) {
+    return {
+      status: "fetch_failed",
+      items: [],
+      error: formatError(error),
+    };
+  }
+}
+
+function buildAihotItemsUrl(env) {
+  const base = sanitizeLine(env.AIHOT_ITEMS_URL || DEFAULT_AIHOT_ITEMS_URL);
+  const url = new URL(base);
+  if (!url.searchParams.has("mode")) {
+    url.searchParams.set("mode", "selected");
+  }
+  url.searchParams.set("take", String(getAihotItemsTake(env)));
+  return url.toString();
+}
+
+export function normalizeAihotItemsForNews(items) {
+  return (Array.isArray(items) ? items : [])
+    .map((item) => {
+      const title = sanitizeLine(item && item.title ? item.title : "");
+      const link = sanitizeLine(item && (item.url || item.link) ? (item.url || item.link) : "");
+      const source = sanitizeLine(item && item.source ? item.source : "AI HOT");
+      const summary = truncateText(sanitizeParagraph(item && item.summary ? item.summary : ""), 360);
+      const publishedAt = sanitizeLine(item && (item.publishedAt || item.published_at) ? (item.publishedAt || item.published_at) : "");
+      const section = sanitizeLine(item && item.section ? item.section : "")
+        || AIHOT_CATEGORY_LABELS[item && item.category]
+        || "行业动态";
+
+      if (!title || !/^https?:\/\//i.test(link)) {
+        return null;
+      }
+
+      return {
+        title,
+        link,
+        summary: summary || "详见原文",
+        section,
+        source,
+        published_at: publishedAt || null,
+        source_links: [
+          {
+            href: link,
+            label: source,
+          },
+        ],
+      };
+    })
+    .filter(Boolean);
+}
+
+export function mergeAihotItemsIntoNewsContext(juyaContext, aihotItems) {
+  const base = juyaContext && typeof juyaContext === "object" ? juyaContext : {};
+  const normalizedItems = normalizeAihotItemsForNews(aihotItems);
+  const existingFreshNews = base.freshNews || null;
+  const existingEntries = existingFreshNews && Array.isArray(existingFreshNews.entries)
+    ? existingFreshNews.entries
+    : [];
+  const existingTitles = [
+    existingFreshNews && existingFreshNews.title,
+    ...existingEntries.map((entry) => entry && entry.title),
+  ].filter(Boolean);
+  const additions = [];
+
+  normalizedItems.forEach((item) => {
+    if (!hasEquivalentNewsTitle(existingTitles, item.title)) {
+      existingTitles.push(item.title);
+      additions.push(item);
+    }
+  });
+  const selectedAdditions = selectDiverseAihotItems(additions, DEFAULT_AIHOT_MERGED_LIMIT);
+
+  if (!selectedAdditions.length) {
+    return {
+      ...base,
+      aihot_status: normalizedItems.length ? "deduped" : "empty",
+      aihot_updates: [],
+    };
+  }
+
+  if (existingFreshNews) {
+    return {
+      ...base,
+      freshNews: {
+        ...existingFreshNews,
+        content_text: appendNewsEntryText(existingFreshNews.content_text, selectedAdditions),
+        entries: [...existingEntries, ...selectedAdditions],
+      },
+      aihot_status: "merged",
+      aihot_updates: selectedAdditions,
+    };
+  }
+
+  const syntheticNews = buildAihotFreshNews(selectedAdditions);
+  return {
+    ...base,
+    source: "AI HOT 精选",
+    status: "fresh",
+    latest: syntheticNews,
+    freshNews: syntheticNews,
+    aihot_status: "fresh",
+    aihot_updates: selectedAdditions,
+  };
+}
+
+function selectDiverseAihotItems(items, limit) {
+  const candidates = (Array.isArray(items) ? items : []).filter(Boolean);
+  const max = Math.max(0, Number.isFinite(limit) ? Math.floor(limit) : DEFAULT_AIHOT_MERGED_LIMIT);
+  if (max === 0 || candidates.length <= max) {
+    return candidates.slice(0, max);
+  }
+
+  const selected = [];
+  const selectedIndexes = new Set();
+  const seenSections = new Set();
+  const addAt = (item, index) => {
+    selected.push(item);
+    selectedIndexes.add(index);
+  };
+
+  candidates.forEach((item, index) => {
+    if (selected.length >= max) {
+      return;
+    }
+    const section = sanitizeLine(item.section || "行业动态");
+    if (!seenSections.has(section)) {
+      seenSections.add(section);
+      addAt(item, index);
+    }
+  });
+
+  candidates.forEach((item, index) => {
+    if (selected.length >= max || selectedIndexes.has(index)) {
+      return;
+    }
+    addAt(item, index);
+  });
+
+  return selected;
+}
+
+function buildAihotFreshNews(items) {
+  const sorted = [...items].sort((a, b) => {
+    const aTime = new Date(a.published_at || 0).getTime();
+    const bTime = new Date(b.published_at || 0).getTime();
+    return bTime - aTime;
+  });
+  const latest = sorted[0] || {};
+  return {
+    title: "AI HOT 精选",
+    link: DEFAULT_AIHOT_HOME_URL,
+    pubDate: latest.published_at || null,
+    description: "AI HOT 精选 AI 行业动态。",
+    content_text: appendNewsEntryText("", items),
+    entries: items,
+  };
+}
+
+function appendNewsEntryText(existingText, entries) {
+  const existing = sanitizeParagraph(existingText || "");
+  const addition = (Array.isArray(entries) ? entries : [])
+    .map((entry) => `${sanitizeLine(entry.title)}：${sanitizeParagraph(entry.summary || "")}`)
+    .filter((line) => line && line !== "：")
+    .join("\n");
+  return [existing, addition].filter(Boolean).join("\n\n");
 }
 
 async function fetchOfficialUpdates(env, now, juyaContext) {
@@ -2026,7 +2245,7 @@ function buildDigestNewsInput(newsContext) {
   }
 
   return {
-    source: news ? "橘鸦 AI 早报" : "official-updates",
+    source: news ? (newsContext.source || "AI 新闻") : "official-updates",
     issue_title: news ? news.title : "今日官方更新",
     link: news ? news.link : "",
     published_at: news ? (news.pubDate || null) : null,
@@ -3108,7 +3327,7 @@ function buildHtmlEmail(input, context) {
     `<div style="${sectionTitleStyle()}">📰 今日 AI 动态</div>`,
     newsHtml,
     input.news && input.news.freshNews && input.news.freshNews.link
-      ? `<div style="margin-top:14px;"><a href="${escapeAttribute(input.news.freshNews.link)}" style="${buttonStyle("#111827", "#ffffff")}">查看橘鸦原文</a></div>`
+      ? `<div style="margin-top:14px;"><a href="${escapeAttribute(input.news.freshNews.link)}" style="${buttonStyle("#111827", "#ffffff")}">查看新闻源</a></div>`
       : "",
     "</section>",
     bridge
@@ -3279,6 +3498,9 @@ function renderProjectCard(repo, ai, index, riskText) {
 }
 
 function getPrimarySourceLabel(item) {
+  if (item.source) {
+    return sanitizeLine(item.source);
+  }
   if (item.link) {
     return formatSourceLinkLabel(item.link, "", 0);
   }
@@ -3389,6 +3611,16 @@ function toStoredNews(newsContext) {
     official_status: newsContext.official_status || "empty",
     official_updates: Array.isArray(newsContext.official_updates)
       ? newsContext.official_updates.map((item) => ({
+          source: item.source,
+          title: item.title,
+          link: item.link,
+          published_at: item.published_at || null,
+        }))
+      : [],
+    aihot_status: newsContext.aihot_status || "empty",
+    aihot_fetch_status: newsContext.aihot_fetch_status || "empty",
+    aihot_updates: Array.isArray(newsContext.aihot_updates)
+      ? newsContext.aihot_updates.map((item) => ({
           source: item.source,
           title: item.title,
           link: item.link,

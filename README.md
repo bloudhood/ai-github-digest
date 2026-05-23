@@ -46,14 +46,14 @@
 
 ## 需要的变量和 Secret
 
-普通变量：
+普通变量（当前 `wrangler.toml`）：
 
-- `EMAIL_FROM`: 例如 `digest@example.com`
-- `EMAIL_TO`: 你要接收日报的邮箱
+- `EMAIL_FROM`: `digest@khaiise.com`
+- `EMAIL_TO`: `abc1275132155@163.com,317770557@qq.com`
 - `REPORT_TIMEZONE`: 默认 `Asia/Hong_Kong`
-- `MAX_PROJECTS`: 默认 `20`
-- `GITHUB_SEARCH_PAGES`: 默认 `1`
-- `DEEPSEEK_MODEL`: 默认 `deepseek-chat`
+- `MAX_PROJECTS`: `15`
+- `GITHUB_SEARCH_PAGES`: `2`
+- `DEEPSEEK_MODEL`: `deepseek-reasoner`
 - `REPEAT_COOLDOWN_DAYS`: 默认 `5`
 - `REPEAT_WINDOW_DAYS`: 默认 `14`
 - `BREAKOUT_STAR_DELTA`: 默认 `120`
@@ -69,36 +69,47 @@ Secrets：
 
 ## 部署步骤
 
-1. 创建 KV Namespace，并把 ID 填进 `wrangler.toml`。
-2. 把 `digest.example.com` 改成你想要的子域名。
-3. 在 Cloudflare 打开 Email Routing，并验证你的接收邮箱。
-4. 确保发件地址属于你的域名，例如 `digest@example.com`。
-5. 配置 `send_email` binding。
-6. 写入 Secret：
+1. 确认 `wrangler.toml` 指向生产 Worker `github-digest`、域名 `digest.khaiise.com`、KV、Queue 和 Email binding。
+2. 在 Cloudflare 打开 Email Routing，并验证接收邮箱。
+3. 确保发件地址属于你的域名，例如 `digest@khaiise.com`。
+4. 配置 `send_email` binding。
+5. 写入 Secret：
 
 ```powershell
-wrangler secret put RUN_SECRET
-wrangler secret put GITHUB_TOKEN
-wrangler secret put DEEPSEEK_API_KEY
+npx -y wrangler secret put RUN_SECRET
+npx -y wrangler secret put GITHUB_TOKEN
+npx -y wrangler secret put DEEPSEEK_API_KEY
 ```
 
-7. 部署：
+6. 部署：
 
 ```powershell
-wrangler deploy
+npm run check
+npm test
+npm run deploy:dry-run
+npx -y wrangler deploy
 ```
 
 ## 手动接口
 
 - `GET /health`
-- `GET /last?secret=YOUR_SECRET`
-- `GET /run?secret=YOUR_SECRET`
-- `GET /run?secret=YOUR_SECRET&dry_run=1`
-- `GET /run?secret=YOUR_SECRET&force=1`
-- `GET /run?secret=YOUR_SECRET&force=1&async=1`
+- `GET /last`
+- `GET /last-error`
+- `GET /run`
+- `GET /run?dry_run=1`
+- `GET /run?force=1`
+
+受保护接口优先使用 `x-run-secret` header：
+
+```powershell
+$headers = @{ "x-run-secret" = "YOUR_SECRET" }
+Invoke-RestMethod "https://digest.khaiise.com/last" -Headers $headers
+Invoke-RestMethod "https://digest.khaiise.com/run?force=1" -Headers $headers
+```
 
 其中 `force=1` 会跳过“当天已发送”和“短期重复抑制”的限制，适合手动重跑。
-`async=1` 会立即返回 `202`，后台继续生成并发送，适合摘要较长时避免前端连接超时。
+非 `dry_run` 的 `/run` 默认把任务提交到 Queue 并返回 `202`；`dry_run=1` 会在当前请求内执行但不发信。
+`?secret=` 仅在 `ALLOW_QUERY_RUN_SECRET=true` 时保留兼容；`direct=1` 仅在 `ENABLE_DIRECT_RUN=true` 时启用。
 
 ## 定时说明
 

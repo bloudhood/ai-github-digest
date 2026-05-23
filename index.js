@@ -1,4 +1,16 @@
 import { EmailMessage } from "cloudflare:email";
+import {
+  DELIVERY_HISTORY_KEY,
+  LAST_ERROR_KEY,
+  LAST_RESULT_KEY,
+  OBSERVED_SNAPSHOT_KEY,
+  RUN_MARKER_PREFIX,
+  SNAPSHOT_KEY,
+  getJson,
+  persistSuccessfulDeliveryState,
+  safeDeleteJson,
+  safePutJson,
+} from "./state.js";
 
 const GITHUB_API_BASE = "https://api.github.com";
 const DEEPSEEK_API_BASE = "https://api.deepseek.com";
@@ -11,12 +23,6 @@ const README_CHAR_LIMIT = 2500;
 const DEFAULT_PROJECT_SUMMARY_BATCH_SIZE = 5;
 const PER_REPO_SUMMARY_CONCURRENCY = 5;
 const NEWS_TAG_TAXONOMY = ["模型发布", "产品更新", "开源发布", "研究突破", "安全漏洞", "行业动态", "工具发布"];
-const SNAPSHOT_KEY = "state:last-snapshot";
-const OBSERVED_SNAPSHOT_KEY = "state:last-observed-snapshot";
-const DELIVERY_HISTORY_KEY = "state:delivery-history";
-const LAST_RESULT_KEY = "digest:last";
-const LAST_ERROR_KEY = "digest:last-error";
-const RUN_MARKER_PREFIX = "digest:sent:";
 const DIGEST_QUEUE_NAME = "github-digest-jobs";
 const ROOT_MESSAGE = "GitHub Digest Worker";
 const DEFAULT_REPEAT_COOLDOWN_DAYS = 5;
@@ -274,13 +280,20 @@ export default {
       const dryRun = isTruthy(url.searchParams.get("dry_run"));
       const quickRun = isTruthy(url.searchParams.get("quick"));
       const dailySimulationRun = isTruthy(url.searchParams.get("daily_sim"));
+      const directRun = isTruthy(url.searchParams.get("direct"));
+      if (directRun && !isTruthy(env.ENABLE_DIRECT_RUN)) {
+        return jsonResponse({
+          ok: false,
+          error: "Direct runs are disabled",
+        }, 403);
+      }
       const runOptions = {
         now: new Date(),
         trigger: "manual",
         force,
         dryRun,
       };
-      if (!dryRun) {
+      if (!dryRun && !directRun) {
         assertQueueBinding(env);
         const queuedPayload = buildDigestJobPayload({
           trigger: "manual",
@@ -425,10 +438,6 @@ async function runDigest(env, options) {
     const topProjects = selectProjectsForDigest(deliverableProjects, env);
     const snapshotCandidates = ranked.slice(0, 200);
 
-    if (!dryRun && !force) {
-      await putJson(env.STATE, OBSERVED_SNAPSHOT_KEY, buildSnapshot(snapshotCandidates, reportDate, timezone));
-    }
-
     if (topProjects.length === 0 && !newsContext.freshNews) {
       throw new Error("No deliverable GitHub repositories or fresh AI news were collected.");
     }
@@ -454,25 +463,26 @@ async function runDigest(env, options) {
       dryRun,
     });
 
+    const stateWarnings = [];
     if (!dryRun) {
-      if (!force) {
-        await env.STATE.put(runMarkerKey, JSON.stringify({
-          reportDate,
-          sent_at: new Date().toISOString(),
-          subject: emailPayload.subject,
-        }), {
-          expirationTtl: 60 * 60 * 24 * 8,
-        });
-      }
       await sendEmail(env, emailPayload.subject, emailPayload.textBody, emailPayload.htmlBody);
-      if (!force) {
-        await putJson(env.STATE, SNAPSHOT_KEY, buildSnapshot(snapshotCandidates, reportDate, timezone));
-        await putJson(env.STATE, DELIVERY_HISTORY_KEY, updateDeliveryHistory(deliveryHistory, enrichedProjects, newsContext, now, timezone));
-      }
-    }
 
-    if (!dryRun) {
-      await putJson(env.STATE, LAST_RESULT_KEY, {
+      if (!force) {
+        stateWarnings.push(...await persistSuccessfulDeliveryState(env.STATE, {
+          runMarkerKey,
+          marker: {
+            reportDate,
+            sent_at: new Date().toISOString(),
+            subject: emailPayload.subject,
+          },
+          observedSnapshot: buildSnapshot(snapshotCandidates, reportDate, timezone),
+          snapshot: buildSnapshot(snapshotCandidates, reportDate, timezone),
+          history: updateDeliveryHistory(deliveryHistory, enrichedProjects, newsContext, now, timezone),
+        }));
+      }
+
+      stateWarnings.push(...await safeDeleteJson(env.STATE, LAST_ERROR_KEY));
+      stateWarnings.push(...await safePutJson(env.STATE, LAST_RESULT_KEY, {
         ok: true,
         reportDate,
         timezone,
@@ -483,7 +493,12 @@ async function runDigest(env, options) {
         repositories: enrichedProjects.map(toStoredRepository),
         news: toStoredNews(newsContext),
         aiDigest,
-      });
+        state_warnings: stateWarnings,
+      }));
+    }
+
+    if (stateWarnings.length) {
+      console.warn(`Digest sent, but state persistence had warnings: ${stateWarnings.join(" | ")}`);
     }
 
     return {
@@ -495,6 +510,7 @@ async function runDigest(env, options) {
       sent: !dryRun,
       subject: emailPayload.subject,
       repositories: enrichedProjects.map(toStoredRepository),
+      state_warnings: stateWarnings,
     };
   } catch (error) {
     const failure = {
@@ -505,7 +521,10 @@ async function runDigest(env, options) {
       failed_at: new Date().toISOString(),
       error: formatError(error),
     };
-    await putJson(env.STATE, LAST_ERROR_KEY, failure);
+    const errorWarnings = await safePutJson(env.STATE, LAST_ERROR_KEY, failure);
+    if (errorWarnings.length) {
+      console.warn(`Failed to persist digest error state: ${errorWarnings.join(" | ")}`);
+    }
     return failure;
   }
 }
@@ -3650,9 +3669,30 @@ function isAuthorized(request, env, url) {
     return false;
   }
 
-  const querySecret = url.searchParams.get("secret");
   const headerSecret = request.headers.get("x-run-secret");
-  return querySecret === expected || headerSecret === expected;
+  if (safeSecretEqual(headerSecret, expected)) {
+    return true;
+  }
+
+  if (!isTruthy(env.ALLOW_QUERY_RUN_SECRET)) {
+    return false;
+  }
+
+  return safeSecretEqual(url.searchParams.get("secret"), expected);
+}
+
+function safeSecretEqual(actual, expected) {
+  const actualText = String(actual || "");
+  const expectedText = String(expected || "");
+  if (!actualText || !expectedText || actualText.length !== expectedText.length) {
+    return false;
+  }
+
+  let mismatch = 0;
+  for (let index = 0; index < expectedText.length; index += 1) {
+    mismatch |= actualText.charCodeAt(index) ^ expectedText.charCodeAt(index);
+  }
+  return mismatch === 0;
 }
 
 function unauthorized() {
@@ -3669,22 +3709,6 @@ function jsonResponse(payload, status = 200) {
       "content-type": "application/json; charset=UTF-8",
     },
   });
-}
-
-async function getJson(kv, key, fallbackValue) {
-  const raw = await kv.get(key);
-  if (!raw) {
-    return fallbackValue;
-  }
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return fallbackValue;
-  }
-}
-
-async function putJson(kv, key, value) {
-  await kv.put(key, JSON.stringify(value));
 }
 
 function formatDateInTimeZone(date, timeZone) {

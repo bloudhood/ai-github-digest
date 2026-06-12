@@ -45,7 +45,7 @@ queue = "github-digest-jobs"
 queue = "github-digest-jobs"
 max_batch_size = 1
 max_batch_timeout = 2
-max_retries = 0
+max_retries = 3
 
 [[send_email]]
 name = "EMAIL_OUT"

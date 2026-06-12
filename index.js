@@ -22,6 +22,8 @@ const DEFAULT_GITHUB_PAGES = 2;
 const README_CHAR_LIMIT = 2500;
 const DEFAULT_PROJECT_SUMMARY_BATCH_SIZE = 5;
 const PER_REPO_SUMMARY_CONCURRENCY = 5;
+// Keep GitHub Search bursts modest to stay clear of secondary rate limits.
+const SEARCH_PLAN_CONCURRENCY = 3;
 const NEWS_TAG_TAXONOMY = ["模型发布", "产品更新", "开源发布", "研究突破", "安全漏洞", "行业动态", "工具发布"];
 const DIGEST_QUEUE_NAME = "github-digest-jobs";
 const ROOT_MESSAGE = "GitHub Digest Worker";
@@ -47,6 +49,9 @@ const DEFAULT_MIN_BREAKOUT_REPEAT_GAP_DAYS = 3;
 const DEFAULT_OFFICIAL_UPDATE_LIMIT = 6;
 const DEFAULT_OFFICIAL_UPDATE_TIMEOUT_MS = 4500;
 const DEFAULT_DEEPSEEK_TIMEOUT_MS = 55000;
+const DEFAULT_GITHUB_FETCH_TIMEOUT_MS = 10000;
+const DEFAULT_HTML_SOURCE_TIMEOUT_MS = 10000;
+const DEFAULT_JUYA_TIMEOUT_MS = 8000;
 const DEFAULT_OFFICIAL_UPDATE_LOOKBACK_HOURS = 120;
 const NEWSNOW_API_BASE = "https://newsnow.busiyi.world/api/s";
 const NEWSNOW_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
@@ -68,7 +73,7 @@ const SOCIAL_AI_KEYWORDS = [
 const PROJECT_SUMMARY_README_LIMIT = 1400;
 const DEFAULT_RELEASE_CANDIDATE_LIMIT = 2;
 const DEFAULT_README_ENRICH_LIMIT = 12;
-const DEFAULT_TRENDING_CANDIDATE_LIMIT = 20;
+const DEFAULT_TRENDING_CANDIDATE_LIMIT = 25;
 const QUALIFICATION_BUCKET_PRIORITY = {
   core: 0,
   reference: 1,
@@ -374,10 +379,10 @@ export default {
         }
 
         console.warn(`Digest queue job failed: ${result.error || "unknown error"}`);
-        message.retry();
+        message.retry({ delaySeconds: 300 });
       } catch (error) {
         console.warn(`Digest queue processing error: ${formatError(error)}`);
-        message.retry();
+        message.retry({ delaySeconds: 300 });
       }
     }
   },
@@ -391,6 +396,16 @@ async function runDigest(env, options) {
   const runMarkerKey = `${RUN_MARKER_PREFIX}${reportDate}`;
   const dryRun = Boolean(options.dryRun);
   const force = Boolean(options.force);
+  const phaseTimings = {};
+  const timePhase = async (name, fn) => {
+    const phaseStart = Date.now();
+    try {
+      return await fn();
+    } finally {
+      phaseTimings[name] = Date.now() - phaseStart;
+      console.log(`Digest phase ${name} took ${phaseTimings[name]}ms`);
+    }
+  };
 
   try {
     assertRequiredBindings(env);
@@ -411,14 +426,14 @@ async function runDigest(env, options) {
     const deliveredSnapshot = await getJson(env.STATE, SNAPSHOT_KEY, null);
     const previousSnapshot = await getJson(env.STATE, OBSERVED_SNAPSHOT_KEY, deliveredSnapshot);
     const deliveryHistory = normalizeDeliveryHistory(await getJson(env.STATE, DELIVERY_HISTORY_KEY, null));
-    const juyaContext = await fetchJuyaDigest(env, deliveryHistory, now, force);
-    const [aihotResult, officialResult, socialResult] = await Promise.allSettled([
+    const juyaContext = await timePhase("news_juya", () => fetchJuyaDigest(env, deliveryHistory, now, force));
+    const [aihotResult, officialResult, socialResult] = await timePhase("news_parallel", () => Promise.allSettled([
       fetchAihotUpdates(env, now, juyaContext),
       isOfficialUpdatesEnabled(env)
         ? fetchOfficialUpdates(env, now, juyaContext)
         : Promise.resolve({ status: "disabled", items: [], sources: [] }),
       fetchSocialTrends(env),
-    ]);
+    ]));
     const aihotContext = aihotResult.status === "fulfilled"
       ? aihotResult.value
       : { status: "fetch_failed", items: [], error: formatError(aihotResult.reason) };
@@ -430,10 +445,10 @@ async function runDigest(env, options) {
       : { status: "fetch_failed", items: [] };
     const newsContext = mergeNewsContexts(juyaContext, aihotContext, officialContext, socialContext);
     const searchPlans = buildSearchPlans(now);
-    const candidates = await collectCandidates(env, searchPlans);
+    const candidates = await timePhase("collect_candidates", () => collectCandidates(env, searchPlans));
     const ranked = rankCandidates(candidates, previousSnapshot, now, newsContext, env);
     const selectedProjects = filterRepeatedProjects(ranked, deliveryHistory, now, env, force);
-    const annotatedProjects = await annotateReleaseSignalsForCandidates(env, selectedProjects, now);
+    const annotatedProjects = await timePhase("release_signals", () => annotateReleaseSignalsForCandidates(env, selectedProjects, now));
     const deliverableProjects = filterDeliverableProjects(annotatedProjects, env);
     const topProjects = selectProjectsForDigest(deliverableProjects, env);
     const snapshotCandidates = ranked.slice(0, 200);
@@ -442,15 +457,15 @@ async function runDigest(env, options) {
       throw new Error("No deliverable GitHub repositories or fresh AI news were collected.");
     }
 
-    const enrichedProjects = await enrichProjects(env, topProjects);
-    const aiDigest = await summarizeDigest(env, {
+    const enrichedProjects = await timePhase("enrich_readmes", () => enrichProjects(env, topProjects));
+    const aiDigest = await timePhase("deepseek_summarize", () => summarizeDigest(env, {
       reportDate,
       timezone,
       trigger: options.trigger,
       repositories: enrichedProjects,
       news: buildDigestNewsInput(newsContext),
       news_status: newsContext.status,
-    });
+    }));
     const emailPayload = buildEmailPayload({
       reportDate,
       timezone,
@@ -469,7 +484,7 @@ async function runDigest(env, options) {
     const stateWarnings = [];
     let emailDelivery = null;
     if (!dryRun) {
-      emailDelivery = await sendEmail(env, emailPayload.subject, emailPayload.textBody, emailPayload.htmlBody);
+      emailDelivery = await timePhase("send_email", () => sendEmail(env, emailPayload.subject, emailPayload.textBody, emailPayload.htmlBody));
       if (emailDelivery.failed_count > 0) {
         stateWarnings.push(`email partial failure: ${emailDelivery.failed_recipients.map((item) => `${item.to}: ${item.error}`).join("; ")}`);
       }
@@ -503,6 +518,7 @@ async function runDigest(env, options) {
         email_acceptance_status: emailDelivery.status,
         email_delivery: emailDelivery,
         deliverability: emailPayload.deliverability,
+        phase_timings_ms: phaseTimings,
         repositories: enrichedProjects.map(toStoredRepository),
         news: toStoredNews(newsContext),
         aiDigest,
@@ -525,6 +541,7 @@ async function runDigest(env, options) {
       repositories: enrichedProjects.map(toStoredRepository),
       email_delivery: emailDelivery,
       deliverability: emailPayload.deliverability,
+      phase_timings_ms: phaseTimings,
       state_warnings: stateWarnings,
     };
   } catch (error) {
@@ -535,6 +552,7 @@ async function runDigest(env, options) {
       dryRun,
       failed_at: new Date().toISOString(),
       error: formatError(error),
+      phase_timings_ms: phaseTimings,
     };
     const errorWarnings = await safePutJson(env.STATE, LAST_ERROR_KEY, failure);
     if (errorWarnings.length) {
@@ -702,6 +720,16 @@ function buildSearchPlans(now) {
   const base = "fork:false archived:false template:false";
   return [
     {
+      name: "general-new-hot",
+      sort: "stars",
+      query: `${base} stars:>=120 created:>=${dateDaysAgo(now, 14)}`,
+    },
+    {
+      name: "general-fresh-surge",
+      sort: "stars",
+      query: `${base} stars:>=25 created:>=${dateDaysAgo(now, 4)}`,
+    },
+    {
       name: "new-ai-breakout",
       sort: "stars",
       query: `${base} stars:>=15 created:>=${dateDaysAgo(now, 10)} (agent OR model OR workflow)`,
@@ -730,12 +758,12 @@ function buildSearchPlans(now) {
 }
 
 async function collectCandidates(env, plans) {
+  // Trending and Search are complementary: Trending carries the canonical daily
+  // hot list (with scraped 24h star deltas), Search surfaces newborn repos that
+  // have not reached the Trending page yet. Always merge both.
   let trendingCandidates = [];
   try {
     trendingCandidates = await collectTrendingCandidates(env);
-    if (trendingCandidates.length >= 6) {
-      return trendingCandidates;
-    }
   } catch (error) {
     console.warn(`GitHub Trending candidate collection failed: ${formatError(error)}`);
   }
@@ -758,25 +786,39 @@ async function collectCandidates(env, plans) {
 async function collectSearchCandidates(env, plans) {
   const seen = new Map();
   const perPage = 50;
+  const limit = createConcurrencyLimiter(SEARCH_PLAN_CONCURRENCY);
+  const tasks = [];
 
   for (const plan of plans) {
     for (let page = 1; page <= getGithubPages(env); page += 1) {
-      const items = await githubSearchRepositories(env, plan.query, plan.sort, page, perPage);
-      for (const item of items) {
-        const normalized = normalizeRepository(item, plan.name);
-        if (!normalized) {
-          continue;
+      tasks.push(limit(async () => {
+        try {
+          const items = await githubSearchRepositories(env, plan.query, plan.sort, page, perPage);
+          return { plan, items };
+        } catch (error) {
+          console.warn(`GitHub search failed for plan "${plan.name}" page ${page}: ${formatError(error)}`);
+          return { plan, items: [] };
         }
+      }));
+    }
+  }
 
-        const existing = seen.get(normalized.full_name);
-        if (!existing) {
-          seen.set(normalized.full_name, normalized);
-          continue;
-        }
-
-        existing.search_sources = Array.from(new Set([...existing.search_sources, ...normalized.search_sources]));
-        existing.query_rank = Math.min(existing.query_rank, normalized.query_rank);
+  const results = await Promise.all(tasks);
+  for (const { plan, items } of results) {
+    for (const item of items) {
+      const normalized = normalizeRepository(item, plan.name);
+      if (!normalized) {
+        continue;
       }
+
+      const existing = seen.get(normalized.full_name);
+      if (!existing) {
+        seen.set(normalized.full_name, normalized);
+        continue;
+      }
+
+      existing.search_sources = Array.from(new Set([...existing.search_sources, ...normalized.search_sources]));
+      existing.query_rank = Math.min(existing.query_rank, normalized.query_rank);
     }
   }
 
@@ -850,12 +892,12 @@ function mergeDiscoverySeeds(...seedGroups) {
 }
 
 async function fetchGithubTrendingSeeds() {
-  const response = await fetch(GITHUB_TRENDING_DAILY_URL, {
+  const response = await fetchWithTimeout(GITHUB_TRENDING_DAILY_URL, {
     headers: {
       "user-agent": "ai-github-digest-worker",
       "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     },
-  });
+  }, DEFAULT_HTML_SOURCE_TIMEOUT_MS);
 
   if (!response.ok) {
     const body = await safeText(response);
@@ -867,12 +909,12 @@ async function fetchGithubTrendingSeeds() {
 }
 
 async function fetchTrendshiftSeeds() {
-  const response = await fetch(TRENDSHIFT_HOME_URL, {
+  const response = await fetchWithTimeout(TRENDSHIFT_HOME_URL, {
     headers: {
       "user-agent": "ai-github-digest-worker",
       "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     },
-  });
+  }, DEFAULT_HTML_SOURCE_TIMEOUT_MS);
 
   if (!response.ok) {
     const body = await safeText(response);
@@ -967,9 +1009,9 @@ function parseTrendshiftHtml(html) {
 }
 
 async function githubGetRepository(env, fullName) {
-  const response = await fetch(`${GITHUB_API_BASE}/repos/${fullName}`, {
+  const response = await fetchWithTimeout(`${GITHUB_API_BASE}/repos/${fullName}`, {
     headers: githubHeaders(env),
-  });
+  }, DEFAULT_GITHUB_FETCH_TIMEOUT_MS);
 
   if (!response.ok) {
     const body = await safeText(response);
@@ -1007,9 +1049,9 @@ async function githubSearchRepositories(env, query, sort, page, perPage) {
   url.searchParams.set("per_page", String(perPage));
   url.searchParams.set("page", String(page));
 
-  const response = await fetch(url.toString(), {
+  const response = await fetchWithTimeout(url.toString(), {
     headers: githubHeaders(env),
-  });
+  }, DEFAULT_GITHUB_FETCH_TIMEOUT_MS);
 
   if (!response.ok) {
     const body = await safeText(response);
@@ -1143,13 +1185,20 @@ function buildReasons(repo, signals) {
 }
 
 function computeMomentumScore(repo, signals) {
-  const starDeltaScore = Math.min(40, Math.sqrt(Math.max(0, signals.starDelta)) * 4);
+  // Cap at 55 (saturates near +190/day) so mega-viral repos still separate
+  // from ordinary hot repos instead of flattening at +100/day.
+  const starDeltaScore = Math.min(55, Math.sqrt(Math.max(0, signals.starDelta)) * 4);
   const earlyVelocityScore = signals.previous
     ? 0
     : Math.min(18, (Math.log10(repo.stars + 1) * 6) / Math.sqrt(signals.ageDays));
   const recencyScore = Math.max(0, 48 - signals.hoursSincePush) / 48 * 10;
   const forkHeatScore = Math.min(8, Math.log10(repo.forks + 1) * 2);
-  const score = Number((starDeltaScore + earlyVelocityScore + recencyScore + forkHeatScore).toFixed(2));
+  const trendingRank = Number(repo.trending_rank || 0);
+  const trendingRankScore = trendingRank > 0 ? (Math.max(0, 26 - trendingRank) / 25) * 6 : 0;
+  const crossSourceScore = trendingRank > 0 && Number(repo.trendshift_rank || 0) > 0 ? 3 : 0;
+  const score = Number((
+    starDeltaScore + earlyVelocityScore + recencyScore + forkHeatScore + trendingRankScore + crossSourceScore
+  ).toFixed(2));
 
   return {
     score,
@@ -1158,6 +1207,8 @@ function computeMomentumScore(repo, signals) {
       earlyVelocityScore: Number(earlyVelocityScore.toFixed(2)),
       recencyScore: Number(recencyScore.toFixed(2)),
       forkHeatScore: Number(forkHeatScore.toFixed(2)),
+      trendingRankScore: Number(trendingRankScore.toFixed(2)),
+      crossSourceScore,
     },
   };
 }
@@ -1343,9 +1394,9 @@ function selectReleaseCandidatesForAnnotation(repositories, env) {
 }
 
 async function fetchLatestReleaseInfo(env, fullName, now) {
-  const response = await fetch(`${GITHUB_API_BASE}/repos/${fullName}/releases?per_page=1`, {
+  const response = await fetchWithTimeout(`${GITHUB_API_BASE}/repos/${fullName}/releases?per_page=1`, {
     headers: githubHeaders(env),
-  });
+  }, DEFAULT_GITHUB_FETCH_TIMEOUT_MS);
 
   if (response.status === 404) {
     return { ok: true, has_recent_release: false, release: null };
@@ -1381,21 +1432,12 @@ async function fetchLatestReleaseInfo(env, fullName, now) {
 function filterDeliverableProjects(repositories, env) {
   const minDelta = getMinDeliverableStarDelta(env);
   const authenticityThreshold = getAuthenticityThreshold(env);
-  const minAIDomainScore = 2;
-  const breakoutDelta = 100;
-  const breakoutForks = 1000;
   const lowDeltaQualityFloor = 30;
 
   return repositories.filter((repo) => {
-    const isBreakout = repo.star_delta_24h >= breakoutDelta || (repo.star_delta_24h >= 20 && repo.forks >= breakoutForks);
     const hasReleaseSignal = Boolean(repo.has_recent_release)
       && repo.authenticity_score >= authenticityThreshold
-      && repo.ai_domain_score >= minAIDomainScore
       && (repo.stars >= 120 || Number(repo.release_signal_score || 0) > 0);
-    const isRelevant = repo.ai_domain_score >= minAIDomainScore || repo.topic_relevance_score > 0;
-    if (!isRelevant && !isBreakout && !hasReleaseSignal) {
-      return false;
-    }
 
     if (!passesBaselineQualification(repo)) {
       return false;
@@ -1586,7 +1628,8 @@ function buildQualificationProfile(repo) {
 
 function buildHotnessProfile(repo) {
   const delta = Number(repo.star_delta_24h || 0);
-  const isReleaseLead = Boolean(repo.has_recent_release) && Number(repo.topic_relevance_score || 0) >= 2;
+  const isReleaseLead = Boolean(repo.has_recent_release)
+    && (Number(repo.topic_relevance_score || 0) >= 2 || Number(repo.ai_domain_score || 0) >= 4);
   const trendshiftRank = Number(repo.trendshift_rank || 0);
   const trendshiftScore = Number(repo.trendshift_score || 0);
   if (delta >= 120 || (delta >= 80 && Number(repo.forks || 0) >= 500)) {
@@ -2053,7 +2096,7 @@ async function fetchJuyaDigest(env, history, now, force) {
   };
 
   try {
-    const response = await fetch(rssUrl, { headers });
+    const response = await fetchWithTimeout(rssUrl, { headers }, DEFAULT_JUYA_TIMEOUT_MS);
     if (!response.ok) {
       throw new Error(`RSS fetch failed (${response.status})`);
     }
@@ -2356,9 +2399,25 @@ function buildNewsSignals(newsContext) {
   const socialItems = newsContext && Array.isArray(newsContext.social_trending)
     ? newsContext.social_trending : [];
   const socialText = socialItems.map((item) => item.title).join(" ");
+  const entryItems = article && Array.isArray(article.entries) ? article.entries : [];
+  const entryText = entryItems
+    .map((item) => `${item.title || ""} ${item.summary || ""}`)
+    .join(" ");
+  const aihotItems = newsContext && Array.isArray(newsContext.aihot_updates)
+    ? newsContext.aihot_updates
+    : [];
+  const aihotText = aihotItems
+    .map((item) => `${item.title || ""} ${item.summary || ""}`)
+    .join(" ");
   const summaryParts = [];
   if (article) {
     summaryParts.push(article.title, article.description);
+  }
+  if (entryText) {
+    summaryParts.push(entryText);
+  }
+  if (aihotText) {
+    summaryParts.push(aihotText);
   }
   if (officialText) {
     summaryParts.push(officialText);
@@ -2449,10 +2508,14 @@ function estimateAIDomainScore(repo) {
     Array.isArray(repo.topics) ? repo.topics.join(" ") : "",
     repo.owner_login,
   ].join(" "));
+  // Token-boundary matching: a bare substring test lets short terms like "ai"
+  // match inside "main", "email", "training" and inflates the score.
+  const tokens = new Set(corpus.split(/[^a-z0-9]+/).filter(Boolean));
   let score = 0;
 
   for (const term of AI_DOMAIN_TERMS) {
-    if (corpus.includes(term)) {
+    const matched = term.length >= 6 ? corpus.includes(term) : tokens.has(term);
+    if (matched) {
       score += term.length >= 6 ? 2 : 1;
     }
   }
@@ -2461,9 +2524,9 @@ function estimateAIDomainScore(repo) {
 }
 
 async function fetchReadme(env, fullName) {
-  const response = await fetch(`${GITHUB_API_BASE}/repos/${fullName}/readme`, {
+  const response = await fetchWithTimeout(`${GITHUB_API_BASE}/repos/${fullName}/readme`, {
     headers: githubHeaders(env),
-  });
+  }, DEFAULT_GITHUB_FETCH_TIMEOUT_MS);
 
   if (response.status === 404) {
     return "";

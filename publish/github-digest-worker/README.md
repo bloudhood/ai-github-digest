@@ -79,9 +79,12 @@
 - `REPORT_TIMEZONE`：报告时区，例如 `Asia/Hong_Kong`
 - `MAX_PROJECTS`：单封邮件最多包含多少个项目
 - `GITHUB_SEARCH_PAGES`：API 兜底搜索深度
-- `DEEPSEEK_MODEL`：默认 DeepSeek 模型
-- `DIGEST_OVERVIEW_MODEL`：总览模型
-- `PROJECT_SUMMARY_MODEL`：项目摘要模型
+- `DEEPSEEK_MODEL`：默认 `deepseek-v4-flash`
+- `DIGEST_OVERVIEW_MODEL`：复杂总览使用 `deepseek-v4-pro`
+- `PROJECT_SUMMARY_MODEL`：项目摘要使用 `deepseek-v4-flash`
+- `DEEPSEEK_THINKING`：默认 `enabled`
+- `DIGEST_OVERVIEW_REASONING_EFFORT`：总览默认 `max`
+- `PROJECT_SUMMARY_REASONING_EFFORT`：项目摘要默认 `high`
 - `REPEAT_COOLDOWN_DAYS`：重复抑制冷却期
 - `REPEAT_WINDOW_DAYS`：重复抑制窗口
 - `BREAKOUT_STAR_DELTA`：突破性回归阈值

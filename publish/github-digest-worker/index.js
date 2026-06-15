@@ -2,6 +2,11 @@ import { EmailMessage } from "cloudflare:email";
 
 const GITHUB_API_BASE = "https://api.github.com";
 const DEEPSEEK_API_BASE = "https://api.deepseek.com";
+const DEEPSEEK_V4_PRO_MODEL = "deepseek-v4-pro";
+const DEEPSEEK_V4_FLASH_MODEL = "deepseek-v4-flash";
+const DEEPSEEK_THINKING_ENABLED = "enabled";
+const DEEPSEEK_EFFORT_HIGH = "high";
+const DEEPSEEK_EFFORT_MAX = "max";
 const GITHUB_TRENDING_DAILY_URL = "https://github.com/trending?since=daily";
 const TRENDSHIFT_HOME_URL = "https://trendshift.io/";
 const DEFAULT_TIMEZONE = "Asia/Hong_Kong";
@@ -414,9 +419,12 @@ function resolveRuntimeEnv(env, options) {
 function applyManualQuickOverrides(env) {
   return {
     ...env,
-    DEEPSEEK_MODEL: "deepseek-chat",
-    DIGEST_OVERVIEW_MODEL: "deepseek-chat",
-    PROJECT_SUMMARY_MODEL: "deepseek-chat",
+    DEEPSEEK_MODEL: DEEPSEEK_V4_FLASH_MODEL,
+    DIGEST_OVERVIEW_MODEL: DEEPSEEK_V4_FLASH_MODEL,
+    PROJECT_SUMMARY_MODEL: DEEPSEEK_V4_FLASH_MODEL,
+    DEEPSEEK_THINKING: DEEPSEEK_THINKING_ENABLED,
+    DIGEST_OVERVIEW_REASONING_EFFORT: DEEPSEEK_EFFORT_HIGH,
+    PROJECT_SUMMARY_REASONING_EFFORT: DEEPSEEK_EFFORT_HIGH,
   };
 }
 
@@ -424,9 +432,12 @@ function applyManualDailySimulationOverrides(env) {
   return {
     ...env,
     MAX_PROJECTS: "20",
-    DEEPSEEK_MODEL: "deepseek-chat",
-    DIGEST_OVERVIEW_MODEL: "deepseek-chat",
-    PROJECT_SUMMARY_MODEL: "deepseek-chat",
+    DEEPSEEK_MODEL: DEEPSEEK_V4_FLASH_MODEL,
+    DIGEST_OVERVIEW_MODEL: DEEPSEEK_V4_PRO_MODEL,
+    PROJECT_SUMMARY_MODEL: DEEPSEEK_V4_FLASH_MODEL,
+    DEEPSEEK_THINKING: DEEPSEEK_THINKING_ENABLED,
+    DIGEST_OVERVIEW_REASONING_EFFORT: DEEPSEEK_EFFORT_MAX,
+    PROJECT_SUMMARY_REASONING_EFFORT: DEEPSEEK_EFFORT_HIGH,
     JUYA_CONTENT_LIMIT: "30000",
   };
 }
@@ -2034,6 +2045,7 @@ async function summarizeDigestOverview(env, payload) {
   try {
     const data = await callDeepSeekJson(env, {
       modelOverride: getDigestOverviewModel(env),
+      reasoningEffort: getDigestOverviewReasoningEffort(env),
       maxTokens: 2200,
       payload: {
         reportDate: payload.reportDate,
@@ -2169,6 +2181,7 @@ async function summarizeProjectBatch(env, payload) {
   const requestedMap = new Map(requested.map((repo) => [repo.full_name, repo]));
   const data = await callDeepSeekJson(env, {
     modelOverride: getProjectSummaryModel(env),
+    reasoningEffort: getProjectSummaryReasoningEffort(env),
     maxTokens: 2600,
     payload: {
       reportDate: payload.reportDate,
@@ -2224,7 +2237,7 @@ async function summarizeProjectBatch(env, payload) {
 }
 
 async function callDeepSeekJson(env, options) {
-  const requestedModel = String(options.modelOverride || env.DEEPSEEK_MODEL || "deepseek-chat");
+  const requestedModel = String(options.modelOverride || env.DEEPSEEK_MODEL || DEEPSEEK_V4_FLASH_MODEL);
   const attempts = buildDeepSeekAttempts(requestedModel);
   const errors = [];
 
@@ -2241,11 +2254,25 @@ async function callDeepSeekJson(env, options) {
 }
 
 function getDigestOverviewModel(env) {
-  return String(env.DIGEST_OVERVIEW_MODEL || env.DEEPSEEK_MODEL || "deepseek-reasoner");
+  return String(env.DIGEST_OVERVIEW_MODEL || DEEPSEEK_V4_PRO_MODEL);
 }
 
 function getProjectSummaryModel(env) {
-  return String(env.PROJECT_SUMMARY_MODEL || env.DEEPSEEK_MODEL || "deepseek-reasoner");
+  return String(env.PROJECT_SUMMARY_MODEL || DEEPSEEK_V4_FLASH_MODEL);
+}
+
+function getDigestOverviewReasoningEffort(env) {
+  return normalizeReasoningEffort(
+    env.DIGEST_OVERVIEW_REASONING_EFFORT || env.DEEPSEEK_REASONING_EFFORT,
+    DEEPSEEK_EFFORT_MAX,
+  );
+}
+
+function getProjectSummaryReasoningEffort(env) {
+  return normalizeReasoningEffort(
+    env.PROJECT_SUMMARY_REASONING_EFFORT || env.DEEPSEEK_REASONING_EFFORT,
+    DEEPSEEK_EFFORT_HIGH,
+  );
 }
 
 function normalizeOverviewDigest(raw, fallback) {
@@ -3187,22 +3214,15 @@ function parseDeepSeekJson(content) {
 }
 
 function buildDeepSeekAttempts(requestedModel) {
-  const normalized = String(requestedModel || "deepseek-chat");
-  const useReasoner = /reasoner/i.test(normalized);
-  const attempts = [{ model: normalized, useResponseFormat: true, label: `${normalized}/json-mode` }];
-  if (useReasoner) {
-    attempts.push(
-      { model: "deepseek-chat", useResponseFormat: true, label: "deepseek-chat/json-mode" },
-    );
-  }
-  return attempts;
+  const normalized = String(requestedModel || DEEPSEEK_V4_FLASH_MODEL);
+  return [{ model: normalized, useResponseFormat: true, label: `${normalized}/json-thinking` }];
 }
 
 async function executeDeepSeekAttempt(env, options, attempt) {
-  const useReasoner = /reasoner/i.test(attempt.model);
+  const thinkingEnabled = getDeepSeekThinkingMode(env) === DEEPSEEK_THINKING_ENABLED;
   const body = {
     model: attempt.model,
-    max_tokens: useReasoner ? Math.max(Number(options.maxTokens || 0), 3200) : Number(options.maxTokens || 1800),
+    max_tokens: Number(options.maxTokens || 1800),
     messages: [
       {
         role: "system",
@@ -3218,7 +3238,10 @@ async function executeDeepSeekAttempt(env, options, attempt) {
   if (attempt.useResponseFormat) {
     body.response_format = { type: "json_object" };
   }
-  if (!useReasoner) {
+  if (thinkingEnabled) {
+    body.thinking = { type: DEEPSEEK_THINKING_ENABLED };
+    body.reasoning_effort = normalizeReasoningEffort(options.reasoningEffort, DEEPSEEK_EFFORT_HIGH);
+  } else {
     body.temperature = 0.2;
   }
 
@@ -3242,6 +3265,19 @@ async function executeDeepSeekAttempt(env, options, attempt) {
     throw new Error("DeepSeek returned an empty response.");
   }
   return parseDeepSeekJson(content);
+}
+
+function getDeepSeekThinkingMode(env) {
+  const raw = String(env.DEEPSEEK_THINKING || DEEPSEEK_THINKING_ENABLED).trim().toLowerCase();
+  return raw === "disabled" ? "disabled" : DEEPSEEK_THINKING_ENABLED;
+}
+
+function normalizeReasoningEffort(value, fallback) {
+  const raw = String(value || fallback || DEEPSEEK_EFFORT_HIGH).trim().toLowerCase();
+  if (raw === "max" || raw === "xhigh") {
+    return DEEPSEEK_EFFORT_MAX;
+  }
+  return DEEPSEEK_EFFORT_HIGH;
 }
 
 function extractDeepSeekContent(data) {

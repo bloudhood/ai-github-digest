@@ -33,28 +33,28 @@
 
 **现状：**
 ```
-Overview 调用（1次，deepseek-reasoner）
+Overview 调用（1次，deepseek-v4-pro，thinking=max）
   输出：subject / opening / bridge / news_section
 
-Project Batch 调用（N/5 次，5个/批，deepseek-reasoner）
+Project Batch 调用（N/5 次，5个/批，deepseek-v4-pro，thinking=max）
   输出：每个项目的 positioning_cn / risk_cn
 ```
 
 **新架构：**
 ```
-Overview 调用（1次，deepseek-reasoner）
+Overview 调用（1次，deepseek-v4-pro，thinking=max）
   输出：subject / opening / bridge
        + news_section.items_cn[]: {title, summary_cn, tag, source, url}  ← DS逐条处理
 
-Per-Repo 调用（每项目1次，并行，deepseek-chat）
+Per-Repo 调用（每项目1次，并行，deepseek-v4-flash，thinking=high）
   输入：仅该项目数据（名称/stars/delta/readme/新闻关联）
   输出：{positioning_cn, risk_cn}
 ```
 
 **关键设计决策：**
 
-- Per-repo 调用使用 `deepseek-chat`（非 reasoner）：单项目描述是直接任务，不需要推理链，节省 token 并加快速度
-- Overview 调用保留 `deepseek-reasoner`：跨多项目的宏观分析和新闻综合需要推理能力
+- Per-repo 调用使用 `deepseek-v4-flash` + `thinking=high`：单项目描述是直接任务，用快速模型控制成本和延迟
+- Overview 调用使用 `deepseek-v4-pro` + `thinking=max`：跨多项目的宏观分析和新闻综合更适合高思考强度
 - 并发限制器：最多同时发起 5 个 per-repo 调用，防止 DeepSeek 限速
 - `Promise.allSettled`：任意项目调用失败只降级该项目，不影响其他项目和整封邮件
 
@@ -129,7 +129,7 @@ README 摘录：
 - `risk_cn` 只在有实质性风险时填写，不得强行填写
 
 **Token 设置：**
-- `maxTokens: 800`（deepseek-chat，无 reasoner 最低限制）
+- `maxTokens: 800`（deepseek-v4-flash，thinking=high）
 - 超时：45秒（上下文小，比现有 55s 更紧）
 
 ---

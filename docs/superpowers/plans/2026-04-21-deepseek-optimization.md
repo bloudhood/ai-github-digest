@@ -6,7 +6,7 @@
 
 **Architecture:** 将现有批量项目摘要（5个/批）替换为并发单项调用（每个 repo 1次 DS 调用，最多 5 个并发），同时扩展 overview 调用的 schema 使每条新闻拥有独立 DS 摘要和从固定分类表中选取的标签。
 
-**Tech Stack:** Cloudflare Worker（单文件 `index.js`，~3900 行），DeepSeek API（`deepseek-reasoner` 用于 overview，`deepseek-chat` 用于 per-repo 调用），`wrangler deploy` 部署。
+**Tech Stack:** Cloudflare Worker（单文件 `index.js`，~3900 行），DeepSeek API（`deepseek-v4-pro` + `thinking=max` 用于 overview，`deepseek-v4-flash` + `thinking=high` 用于 per-repo 调用），`wrangler deploy` 部署。
 
 ---
 
@@ -171,7 +171,7 @@ async function callDeepSeekSingleRepo(env, repo, newsHint) {
 
   try {
     const data = await callDeepSeekJson(env, {
-      modelOverride: "deepseek-chat",
+      modelOverride: "deepseek-v4-flash",
       maxTokens: 800,
       payload: { repository: repoInput, news_titles: newsTitles },
       systemLines: [

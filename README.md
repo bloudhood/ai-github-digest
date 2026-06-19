@@ -51,8 +51,8 @@
 - `EMAIL_FROM`: `digest@khaiise.com`
 - `EMAIL_TO`: `abc1275132155@163.com,317770557@qq.com`
 - `REPORT_TIMEZONE`: 默认 `Asia/Hong_Kong`
-- `MAX_PROJECTS`: `15`
-- `GITHUB_SEARCH_PAGES`: `2`
+- `MAX_PROJECTS`: `10`
+- `GITHUB_SEARCH_PAGES`: `1`
 - `DEEPSEEK_MODEL`: 默认 `deepseek-v4-flash`
 - `DIGEST_OVERVIEW_MODEL`: 复杂总览使用 `deepseek-v4-pro`
 - `PROJECT_SUMMARY_MODEL`: 单项目摘要使用 `deepseek-v4-flash`

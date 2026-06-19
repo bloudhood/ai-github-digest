@@ -93,9 +93,14 @@ test("fallback summaries use factual observation copy instead of vague public-in
     authenticity_score: 20,
   });
 
-  assert.match(fallback.positioning_cn, /过去24小时新增 129 星/);
-  assert.match(fallback.positioning_cn, /观察项/);
+  assert.match(fallback.positioning_cn, /定位：/);
+  assert.match(fallback.positioning_cn, /价值：/);
+  assert.match(fallback.positioning_cn, /看点：/);
+  assert.match(fallback.positioning_cn, /注意：/);
+  assert.match(fallback.positioning_cn, /24h 新增 129 星/);
+  assert.match(fallback.positioning_cn, /核对 README、示例和维护者背景/);
   assert.doesNotMatch(fallback.positioning_cn, /公开资料还不足以判断它是否具备长期可用性/);
+  assert.doesNotMatch(fallback.positioning_cn, /当前公开信息显示它重点提供/);
 });
 
 test("fallback stack inference trusts GitHub language before README keywords", () => {
@@ -112,11 +117,13 @@ test("fallback stack inference trusts GitHub language before README keywords", (
     authenticity_score: 20,
   });
 
-  assert.match(fallback.positioning_cn, /主要基于Swift构建/);
+  assert.match(fallback.positioning_cn, /Swift/);
+  assert.match(fallback.positioning_cn, /GitHub 标记语言为 Swift/);
+  assert.match(fallback.positioning_cn, /看点：/);
   assert.doesNotMatch(fallback.positioning_cn, /主要基于Go构建/);
 });
 
-test("enriches every displayed project by default", async () => {
+test("enriches a bounded project set to preserve Worker subrequest budget", async () => {
   const originalFetch = globalThis.fetch;
   const repos = Array.from({ length: 15 }, (_, index) => ({
     full_name: `owner/repo-${index + 1}`,
@@ -136,7 +143,8 @@ test("enriches every displayed project by default", async () => {
   try {
     const enriched = await enrichProjects({}, repos);
     assert.equal(enriched.length, 15);
-    assert.ok(enriched.every((repo) => repo.readme_excerpt.includes("README content")));
+    assert.ok(enriched.slice(0, 8).every((repo) => repo.readme_excerpt.includes("README content")));
+    assert.ok(enriched.slice(8).every((repo) => repo.readme_excerpt === ""));
   } finally {
     globalThis.fetch = originalFetch;
   }

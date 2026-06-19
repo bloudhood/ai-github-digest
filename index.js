@@ -23,10 +23,10 @@ const DEEPSEEK_EFFORT_MAX = "max";
 const GITHUB_TRENDING_DAILY_URL = "https://github.com/trending?since=daily";
 const TRENDSHIFT_HOME_URL = "https://trendshift.io/";
 const DEFAULT_TIMEZONE = "Asia/Hong_Kong";
-const DEFAULT_MAX_PROJECTS = 15;
-const DEFAULT_GITHUB_PAGES = 2;
+const DEFAULT_MAX_PROJECTS = 10;
+const DEFAULT_GITHUB_PAGES = 1;
 const README_CHAR_LIMIT = 2500;
-const DEFAULT_PROJECT_SUMMARY_BATCH_SIZE = 5;
+const DEFAULT_PROJECT_SUMMARY_BATCH_SIZE = DEFAULT_MAX_PROJECTS;
 // Keep GitHub Search bursts modest to stay clear of secondary rate limits.
 const SEARCH_PLAN_CONCURRENCY = 3;
 const NEWS_TAG_TAXONOMY = ["模型发布", "产品更新", "开源发布", "研究突破", "安全漏洞", "行业动态", "工具发布"];
@@ -86,9 +86,9 @@ const SOCIAL_AI_KEYWORDS = [
   "ai", "llm", "agent", "gpt", "算法", "模型", "训练",
 ];
 const PROJECT_SUMMARY_README_LIMIT = 1400;
-const DEFAULT_RELEASE_CANDIDATE_LIMIT = 2;
-const DEFAULT_README_ENRICH_LIMIT = DEFAULT_MAX_PROJECTS;
-const DEFAULT_TRENDING_CANDIDATE_LIMIT = 20;
+const DEFAULT_RELEASE_CANDIDATE_LIMIT = 0;
+const DEFAULT_README_ENRICH_LIMIT = 8;
+const DEFAULT_TRENDING_CANDIDATE_LIMIT = 8;
 const QUALIFICATION_BUCKET_PRIORITY = {
   core: 0,
   reference: 1,
@@ -466,12 +466,11 @@ async function runDigest(env, options) {
     const previousSnapshot = await getJson(env.STATE, OBSERVED_SNAPSHOT_KEY, deliveredSnapshot);
     const deliveryHistory = normalizeDeliveryHistory(await getJson(env.STATE, DELIVERY_HISTORY_KEY, null));
     const juyaContext = await timePhase("news_juya", () => fetchJuyaDigest(env, deliveryHistory, now, force));
-    const [aihotResult, officialResult, socialResult] = await timePhase("news_parallel", () => Promise.allSettled([
+    const [aihotResult, officialResult] = await timePhase("news_parallel", () => Promise.allSettled([
       fetchAihotUpdates(env, now, juyaContext),
       isOfficialUpdatesEnabled(env)
         ? fetchOfficialUpdates(env, now, juyaContext)
         : Promise.resolve({ status: "disabled", items: [], sources: [] }),
-      fetchSocialTrends(env),
     ]));
     const aihotContext = aihotResult.status === "fulfilled"
       ? aihotResult.value
@@ -479,10 +478,7 @@ async function runDigest(env, options) {
     const officialContext = officialResult.status === "fulfilled"
       ? officialResult.value
       : { status: "fetch_failed", items: [], sources: [] };
-    const socialContext = socialResult.status === "fulfilled"
-      ? socialResult.value
-      : { status: "fetch_failed", items: [] };
-    const newsContext = mergeNewsContexts(juyaContext, aihotContext, officialContext, socialContext);
+    const newsContext = mergeNewsContexts(juyaContext, aihotContext, officialContext, { status: "deferred", items: [], platforms: [] });
     const searchPlans = buildSearchPlans(now);
     const candidates = await timePhase("collect_candidates", () => collectCandidates(env, searchPlans));
     const ranked = rankCandidates(candidates, previousSnapshot, now, newsContext, env);
@@ -505,7 +501,7 @@ async function runDigest(env, options) {
       news: buildDigestNewsInput(newsContext),
       news_status: newsContext.status,
     }));
-    const finalNewsContext = await timePhase("social_translate", () => translateSocialPlatformsInNewsContext(env, newsContext));
+    const finalNewsContext = await timePhase("social_after_summary", () => fetchAndAttachSocialTrends(env, newsContext));
     const emailPayload = buildEmailPayload({
       reportDate,
       timezone,
@@ -2224,6 +2220,23 @@ async function translateSocialPlatformsInNewsContext(env, newsContext) {
   };
 }
 
+async function fetchAndAttachSocialTrends(env, newsContext) {
+  let socialContext;
+  try {
+    socialContext = await fetchSocialTrends(env);
+  } catch (error) {
+    console.warn(`fetchAndAttachSocialTrends skipped: ${formatError(error)}`);
+    socialContext = { status: "fetch_failed", items: [], platforms: [] };
+  }
+  const merged = {
+    ...newsContext,
+    social_trending: Array.isArray(socialContext.items) ? socialContext.items : [],
+    social_platforms: Array.isArray(socialContext.platforms) ? socialContext.platforms : [],
+    social_status: socialContext.status || "empty",
+  };
+  return translateSocialPlatformsInNewsContext(env, merged);
+}
+
 export async function translateExternalSocialPlatforms(env, platforms) {
   if (!env || !env.DEEPSEEK_API_KEY || !Array.isArray(platforms) || !platforms.length) {
     return platforms;
@@ -2305,8 +2318,52 @@ export async function translateExternalSocialPlatforms(env, platforms) {
     });
   } catch (error) {
     console.warn(`translateExternalSocialPlatforms skipped: ${formatError(error)}`);
-    return platforms;
+    return applyLocalExternalSocialTitleFallback(platforms);
   }
+}
+
+function applyLocalExternalSocialTitleFallback(platforms) {
+  return (Array.isArray(platforms) ? platforms : []).map((platform) => {
+    if (!shouldTranslateSocialPlatform(platform && platform.id)) {
+      return platform;
+    }
+    const items = Array.isArray(platform.items) ? platform.items : [];
+    return {
+      ...platform,
+      items: items.map((item) => {
+        const title = sanitizeLine(item && item.title ? item.title : "");
+        if (!title || containsCjkText(title)) {
+          return item;
+        }
+        return {
+          ...item,
+          title_original: title,
+          title: localizeExternalSocialTitle(title),
+        };
+      }),
+    };
+  });
+}
+
+function localizeExternalSocialTitle(title) {
+  let text = sanitizeLine(title);
+  const replacements = [
+    [/Zero[- ]Touch OAuth for MCP/ig, "MCP 的零接触 OAuth"],
+    [/Project Valhalla, Explained: How a Decade of Work Arrives in JDK 28/ig, "Project Valhalla 详解：十年成果如何进入 JDK 28"],
+    [/The AirPods Effect/ig, "AirPods 效应"],
+    [/Hyundai buys Boston Dynamics/ig, "现代汽车收购 Boston Dynamics"],
+    [/What's more impressive, GLM 5\.1 -> 5\.2 or Qwen 3\.5 -> 3\.6\?/ig, "哪个更有看点：GLM 5.1 到 5.2，还是 Qwen 3.5 到 3.6？"],
+    [/Researchers trained a Deep Research agent with 32 H100s and open-sourced everything/ig, "研究人员用 32 块 H100 训练深度研究智能体并全部开源"],
+    [/GLM-5\.2 is the new leading open weights model on the Artificial Analysis Intelligence Index/ig, "GLM-5.2 成为 Artificial Analysis 智能指数领先开源权重模型"],
+    [/New Agentic Benchmark Out: Claude Fable and GLM 5\.2 Top Their Cohorts/ig, "新智能体基准发布：Claude Fable 和 GLM 5.2 分别领先"],
+  ];
+  replacements.forEach(([pattern, replacement]) => {
+    text = text.replace(pattern, replacement);
+  });
+  if (containsCjkText(text)) {
+    return text;
+  }
+  return `社区热议：${text}`;
 }
 
 function shouldTranslateSocialPlatform(platformId) {
@@ -2748,6 +2805,14 @@ function buildDeepSeekRepositoryInputs(repositories) {
     topics: Array.isArray(repo.topics) ? repo.topics : [],
     has_recent_release: Boolean(repo.has_recent_release),
     release_name: repo.recent_release && repo.recent_release.name ? repo.recent_release.name : "",
+    project_type_hint: inferProjectType(repo),
+    topic_hint: inferRepositoryTopic(repo),
+    capability_hint: inferProjectCapability(repo),
+    stack_hint: inferProjectStack(repo),
+    readme_lead: extractLeadSentence(repo.readme_excerpt || ""),
+    use_case_hint: buildFallbackUseCase(repo),
+    signal_hint: buildFallbackSignalAnalysis(repo),
+    caveat_hint: buildFallbackCaveat(repo),
     selection_context: buildRepositorySelectionContext(repo),
     risk_hints: inferProjectRisk(repo),
     readme_excerpt: String(repo.readme_excerpt || "").slice(0, PROJECT_SUMMARY_README_LIMIT),
@@ -3129,12 +3194,17 @@ async function summarizeProjectBatch(env, payload) {
       "You must return exactly one project object for every input repository and preserve full_name verbatim.",
       "Never omit a repository and never use an empty string for positioning_cn.",
       "risk_cn may be an empty string only when there is no concrete legal, dependency, integrity, or abnormal-signal risk.",
-      "Write concise, readable Chinese for email.",
+      "Write concise, analytical Chinese for email.",
       "Every human-facing field ending in _cn must be written in Chinese. Keep repository names, product names, code identifiers, and programming language names as-is, but do not write English prose.",
-      "Each project needs one richer positioning block and risk only when real.",
-      "positioning_cn should usually contain 2 short sentences: first explain what the project actually does, then explain its likely use case, target user, or differentiator.",
-      "Do not simply translate or lightly paraphrase the GitHub description.",
-      "Project body should stay within 3 sentences total.",
+      "Each positioning_cn must help a reader quickly decide what the project is and why it matters.",
+      "Use this compact structure inside positioning_cn: 定位：...。价值：...。看点：...。注意：...。",
+      "定位 should name the concrete category or product shape, not repeat stars, language, or freshness.",
+      "价值 should explain the practical use case, target user, or differentiator in one short sentence.",
+      "看点 should use star_delta_24h, age, update/release, forks, topic match, readme_lead, or signal_hint to explain why it is worth opening today.",
+      "注意 should mention the main adoption caveat from input, or say 适合先看 README/示例/维护节奏。",
+      "Do not simply translate, lightly paraphrase, or restate the GitHub description/README.",
+      "Do not write generic phrases like 当前公开信息显示, 重点提供, 围绕某主题, 值得关注, or 快速上升 unless tied to a concrete value.",
+      "Project body should stay within 4 compact Chinese clauses/sentences total.",
       "Avoid repetitive openers such as 这是一个 / 该项目是一个; start directly from the concrete category or capability when possible.",
       "If risk_hints is empty, keep risk_cn empty and do not invent new legal, privacy, or compliance risks.",
       "When information is limited, say it was not confirmed from the input instead of leaving fields blank.",
@@ -3386,24 +3456,17 @@ function buildFallbackPositioning(repo) {
   const stack = inferProjectStack(repo);
   const sourceDetail = extractPrimaryProjectSignal(repo);
   const facts = buildFallbackFactSignals(repo);
+  const category = buildProjectCategoryLabel(topic, projectType, stack);
+  const value = buildFallbackValueAnalysis(repo, capability, sourceDetail);
+  const signal = buildFallbackSignalAnalysis(repo);
+  const caveat = buildFallbackCaveat(repo);
 
-  if (capability && stack) {
-    return `一个围绕${topic}的${projectType}，当前公开信息显示它重点提供${capability}，并主要基于${stack}构建。`;
-  }
-  if (capability) {
-    return `一个围绕${topic}的${projectType}，当前公开信息显示它重点提供${capability}。`;
-  }
-  if (sourceDetail && isChineseProjectCopy(sourceDetail)) {
-    return `一个围绕${topic}的${projectType}，当前公开信息主要指向${sourceDetail}。`;
-  }
-  if (sourceDetail) {
-    return `一个围绕${topic}的${projectType}，公开描述指向“${sourceDetail}”${facts ? `；${facts}` : "。"}。`;
-  }
-  if (topic) {
-    return `一个围绕${topic}的${projectType}${facts ? `；${facts}` : ""}。当前输入缺少可用 README 摘要，适合作为观察项而不是直接投入依赖。`;
-  }
-
-  return `一个近期热度上升的${projectType}${facts ? `；${facts}` : ""}。当前输入缺少可用 README 摘要，建议先观察定位和维护信号。`;
+  return [
+    `定位：${category}。`,
+    `价值：${value}`,
+    `看点：${signal}`,
+    `注意：${caveat}${facts ? `（${facts}）` : ""}。`,
+  ].join("");
 }
 
 function buildFallbackFactSignals(repo) {
@@ -3418,6 +3481,91 @@ function buildFallbackFactSignals(repo) {
     facts.push(`GitHub 标记语言为 ${sanitizeLine(repo.language)}`);
   }
   return facts.slice(0, 3).join("，");
+}
+
+function buildProjectCategoryLabel(topic, projectType, stack) {
+  const parts = [topic, projectType].filter(Boolean);
+  const category = parts.length ? parts.join(" / ") : "近期热度上升项目";
+  return stack ? `${category}，${stack}` : category;
+}
+
+function buildFallbackValueAnalysis(repo, capability, sourceDetail) {
+  const useCase = buildFallbackUseCase(repo);
+  if (capability) {
+    return `${capability}，${useCase}`;
+  }
+  if (sourceDetail) {
+    return `公开描述指向“${sourceDetail}”，${useCase}`;
+  }
+  if (Number(repo.star_delta_24h || 0) >= 100) {
+    return `短时间关注度上升明显，${useCase}`;
+  }
+  return `当前信号主要来自热度和主题相关性，${useCase}`;
+}
+
+function buildFallbackUseCase(repo) {
+  const corpus = normalizeText([
+    repo.full_name,
+    repo.description,
+    repo.readme_excerpt,
+    Array.isArray(repo.topics) ? repo.topics.join(" ") : "",
+  ].join(" "));
+  if (/agent|harness|workflow|orchestration|multi-agent|multi agent/.test(corpus)) {
+    return "适合评估能否改善智能体编排、任务执行或上下文交接。";
+  }
+  if (/codex|claude code|copilot|cursor|coding|cli|command line/.test(corpus)) {
+    return "适合评估能否提升编码代理、命令行开发或自动化修复效率。";
+  }
+  if (/model|llm|inference|training|glm|qwen|deepseek|generative/.test(corpus)) {
+    return "适合评估模型能力、推理链路或生成式应用集成价值。";
+  }
+  if (/design|ui|react|component|frontend|web/.test(corpus)) {
+    return "适合评估前端产品化、界面生成或设计到代码流程。";
+  }
+  if (/awesome|guide|book|course|docs|tutorial|skills/.test(corpus)) {
+    return "适合快速建立资料索引、技能库或学习路线。";
+  }
+  return "适合先打开仓库核对 README、示例和维护者背景。";
+}
+
+function buildFallbackSignalAnalysis(repo) {
+  const signals = [];
+  if (Number(repo.star_delta_24h || 0) >= 100) {
+    signals.push(`24h 新增 ${repo.star_delta_24h} 星`);
+  } else if (Number(repo.star_delta_24h || 0) > 0) {
+    signals.push(`今天仍有 +${repo.star_delta_24h} 星`);
+  }
+  if (Number.isFinite(Number(repo.age_days)) && Number(repo.age_days) <= 14) {
+    signals.push(`创建约 ${Math.max(0, Math.round(Number(repo.age_days)))} 天`);
+  }
+  if (Number.isFinite(Number(repo.hours_since_push)) && Number(repo.hours_since_push) <= 24) {
+    signals.push(`近 ${Math.max(1, Math.round(Number(repo.hours_since_push)))} 小时有更新`);
+  }
+  if (Number(repo.forks || 0) >= 100) {
+    signals.push(`${repo.forks} 个 fork 说明开发者在试用或复用`);
+  }
+  if (Array.isArray(repo.topic_matches) && repo.topic_matches.length) {
+    signals.push(`与今日 ${repo.topic_matches.slice(0, 2).join("、")} 主题相关`);
+  }
+  if (repo.has_recent_release) {
+    signals.push("近期有正式 release");
+  }
+  return signals.length
+    ? `${signals.slice(0, 3).join("，")}。`
+    : "入选主要来自综合热度和主题相关性，适合先看仓库结构和示例。";
+}
+
+function buildFallbackCaveat(repo) {
+  if (!repo.readme_excerpt) {
+    return "本次输入缺少可用 README 摘要，结论只按 GitHub 元数据和热度信号判断";
+  }
+  if (Number(repo.authenticity_score || 0) < 10) {
+    return "真实性或维护信号偏弱，依赖前需要核对代码来源和 issue 活跃度";
+  }
+  if (repo.age_days <= 14) {
+    return "项目很新，长期维护和真实采用还需要继续观察";
+  }
+  return "投入使用前仍需确认安装路径、许可证和近期维护质量";
 }
 
 function buildFallbackWhyToday(repo) {

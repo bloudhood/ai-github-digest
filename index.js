@@ -40,9 +40,12 @@ const DEFAULT_JUYA_CONTENT_LIMIT = 30000;
 const DEFAULT_AIHOT_ITEMS_URL = "https://aihot.virxact.com/api/public/items?mode=selected";
 const DEFAULT_AIHOT_HOME_URL = "https://aihot.virxact.com/feed.xml";
 const DEFAULT_AIHOT_ITEMS_TAKE = 30;
-const DEFAULT_AIHOT_MERGED_LIMIT = 8;
+const DEFAULT_AIHOT_MERGED_LIMIT = 4;
+const DEFAULT_AIHOT_SUMMARY_LIMIT = 220;
 const DEFAULT_AIHOT_LOOKBACK_HOURS = 36;
 const DEFAULT_AIHOT_TIMEOUT_MS = 4500;
+const DEFAULT_PRIMARY_NEWS_RENDER_LIMIT = 12;
+const DEFAULT_SECONDARY_NEWS_RENDER_LIMIT = 4;
 const DEFAULT_AUTHENTICITY_THRESHOLD = 12;
 const DEFAULT_TOPIC_RELEVANCE_MAX = 15;
 const DEFAULT_RELEASE_LOOKBACK_HOURS = 72;
@@ -61,8 +64,15 @@ const DEFAULT_OFFICIAL_UPDATE_LOOKBACK_HOURS = 120;
 const NEWSNOW_API_BASE = "https://newsnow.busiyi.world/api/s";
 const NEWSNOW_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 const DEFAULT_SOCIAL_TIMEOUT_MS = 8000;
+const DEFAULT_REDDIT_TIMEOUT_MS = 3500;
 const DEFAULT_SOCIAL_ITEM_LIMIT = 50;
 const DEFAULT_SOCIAL_AI_ITEM_LIMIT = 8;
+const DEFAULT_SOCIAL_PLATFORM_DISPLAY_LIMIT = 4;
+const SOCIAL_TRANSLATION_PLATFORM_IDS = new Set(["hacker-news", "reddit-ai"]);
+const HACKER_NEWS_FRONT_PAGE_URL = "https://hn.algolia.com/api/v1/search?tags=front_page&hitsPerPage=16";
+const REDDIT_AI_FEEDS = [
+  { id: "reddit-ai", label: "Reddit AI", url: "https://old.reddit.com/r/LocalLLaMA+MachineLearning/.rss" },
+];
 const SOCIAL_PLATFORMS = [
   { id: "zhihu", label: "知乎" },
   { id: "weibo", label: "微博" },
@@ -77,7 +87,7 @@ const SOCIAL_AI_KEYWORDS = [
 ];
 const PROJECT_SUMMARY_README_LIMIT = 1400;
 const DEFAULT_RELEASE_CANDIDATE_LIMIT = 2;
-const DEFAULT_README_ENRICH_LIMIT = 12;
+const DEFAULT_README_ENRICH_LIMIT = DEFAULT_MAX_PROJECTS;
 const DEFAULT_TRENDING_CANDIDATE_LIMIT = 20;
 const QUALIFICATION_BUCKET_PRIORITY = {
   core: 0,
@@ -495,13 +505,14 @@ async function runDigest(env, options) {
       news: buildDigestNewsInput(newsContext),
       news_status: newsContext.status,
     }));
+    const finalNewsContext = await timePhase("social_translate", () => translateSocialPlatformsInNewsContext(env, newsContext));
     const emailPayload = buildEmailPayload({
       reportDate,
       timezone,
       trigger: options.trigger,
       repositories: enrichedProjects,
       aiDigest,
-      news: newsContext,
+      news: finalNewsContext,
       startedAt,
       completedAt: new Date(),
       dryRun,
@@ -550,10 +561,11 @@ async function runDigest(env, options) {
           deliverability: emailPayload.deliverability,
           phase_timings_ms: phaseTimings,
           repositories_count: enrichedProjects.length,
-          news_status: newsContext.status,
-          juya_latest_link: newsContext.latest ? newsContext.latest.link : null,
-          juya_entries_count: newsContext.freshNews && Array.isArray(newsContext.freshNews.entries)
-            ? newsContext.freshNews.entries.length
+          ai_meta: aiDigest.meta || {},
+          news_status: finalNewsContext.status,
+          juya_latest_link: finalNewsContext.latest ? finalNewsContext.latest.link : null,
+          juya_entries_count: finalNewsContext.freshNews && Array.isArray(finalNewsContext.freshNews.entries)
+            ? finalNewsContext.freshNews.entries.length
             : 0,
           state_warnings: stateWarnings,
         }));
@@ -572,7 +584,8 @@ async function runDigest(env, options) {
           deliverability: emailPayload.deliverability,
           phase_timings_ms: phaseTimings,
           repositories: enrichedProjects.map(toStoredRepository),
-          news: toStoredNews(newsContext),
+          ai_meta: aiDigest.meta || {},
+          news: toStoredNews(finalNewsContext),
           aiDigest,
           state_warnings: stateWarnings,
         }));
@@ -595,6 +608,7 @@ async function runDigest(env, options) {
       email_delivery: emailDelivery,
       deliverability: emailPayload.deliverability,
       phase_timings_ms: phaseTimings,
+      ai_meta: aiDigest.meta || {},
       state_warnings: stateWarnings,
     };
   } catch (error) {
@@ -1606,7 +1620,7 @@ function selectProjectsForDigest(repositories, env) {
   });
 }
 
-async function enrichProjects(env, projects) {
+export async function enrichProjects(env, projects) {
   const limit = Math.min(DEFAULT_README_ENRICH_LIMIT, Array.isArray(projects) ? projects.length : 0);
   return Promise.all((projects || []).map(async (repo, index) => {
     if (index >= limit) {
@@ -1891,11 +1905,13 @@ export function normalizeAihotItemsForNews(items) {
       const title = sanitizeLine(item && item.title ? item.title : "");
       const link = sanitizeLine(item && (item.url || item.link) ? (item.url || item.link) : "");
       const source = sanitizeLine(item && item.source ? item.source : "AI HOT");
-      const summary = truncateText(sanitizeParagraph(item && item.summary ? item.summary : ""), 360);
+      const summary = truncateText(sanitizeParagraph(item && item.summary ? item.summary : ""), DEFAULT_AIHOT_SUMMARY_LIMIT);
       const publishedAt = sanitizeLine(item && (item.publishedAt || item.published_at) ? (item.publishedAt || item.published_at) : "");
+      const category = sanitizeLine(item && item.category ? item.category : "");
       const section = sanitizeLine(item && item.section ? item.section : "")
-        || AIHOT_CATEGORY_LABELS[item && item.category]
+        || AIHOT_CATEGORY_LABELS[category]
         || "行业动态";
+      const score = Number(item && item.score);
 
       if (!title || !/^https?:\/\//i.test(link)) {
         return null;
@@ -1907,6 +1923,10 @@ export function normalizeAihotItemsForNews(items) {
         summary: summary || "详见原文",
         section,
         source,
+        category,
+        score: Number.isFinite(score) ? score : 0,
+        source_group: "AIHOT",
+        is_secondary: true,
         published_at: publishedAt || null,
         source_links: [
           {
@@ -1953,7 +1973,7 @@ export function mergeAihotItemsIntoNewsContext(juyaContext, aihotItems) {
       ...base,
       freshNews: {
         ...existingFreshNews,
-        content_text: appendNewsEntryText(existingFreshNews.content_text, selectedAdditions),
+        content_text: existingFreshNews.content_text,
         entries: [...existingEntries, ...selectedAdditions],
       },
       aihot_status: "merged",
@@ -1973,8 +1993,12 @@ export function mergeAihotItemsIntoNewsContext(juyaContext, aihotItems) {
   };
 }
 
+export function selectAihotItemsForDigest(items, limit = DEFAULT_AIHOT_MERGED_LIMIT) {
+  return selectDiverseAihotItems(items, limit);
+}
+
 function selectDiverseAihotItems(items, limit) {
-  const candidates = (Array.isArray(items) ? items : []).filter(Boolean);
+  const candidates = rankAihotCandidates(Array.isArray(items) ? items : []);
   const max = Math.max(0, Number.isFinite(limit) ? Math.floor(limit) : DEFAULT_AIHOT_MERGED_LIMIT);
   if (max === 0 || candidates.length <= max) {
     return candidates.slice(0, max);
@@ -2007,6 +2031,49 @@ function selectDiverseAihotItems(items, limit) {
   });
 
   return selected;
+}
+
+function rankAihotCandidates(items) {
+  return (Array.isArray(items) ? items : [])
+    .filter(Boolean)
+    .map((item, index) => ({
+      item,
+      index,
+      rank: scoreAihotCandidate(item),
+    }))
+    .sort((a, b) => (b.rank - a.rank) || (a.index - b.index))
+    .map(({ item }) => item);
+}
+
+function scoreAihotCandidate(item) {
+  const text = normalizeText(`${item.title || ""} ${item.summary || ""} ${item.source || ""}`);
+  const source = normalizeText(item.source || "");
+  const category = normalizeText(item.category || item.section || "");
+  let score = Number(item.score);
+  if (!Number.isFinite(score)) {
+    score = 0;
+  }
+
+  if (/(openai|anthropic|google|deepmind|cloudflare|microsoft|github|hugging face|nvidia|aws|meta|elastic)/i.test(source)) {
+    score += 24;
+  }
+  if (/(blog|rss|announcements|research|paper|论文|研究|官方|changelog)/i.test(source)) {
+    score += 12;
+  }
+  if (/(模型|agent|智能体|mcp|open source|开源|安全|漏洞|research|paper|cloudflare|deepseek|anthropic|openai|claude|codex|github)/i.test(text)) {
+    score += 10;
+  }
+  if (/^(paper|ai-products|ai-models|模型|产品|论文)/i.test(category)) {
+    score += 8;
+  }
+  if (/(教程|技巧|快去试试|看看我如何|ppt|youtube-notetaker|视频转)/i.test(text)) {
+    score -= 12;
+  }
+  if (/^(x：|twitter|公众号)/i.test(item.source || "")) {
+    score -= 4;
+  }
+
+  return score;
 }
 
 function buildAihotFreshNews(items) {
@@ -2101,16 +2168,37 @@ async function fetchOfficialFeed(feed, now) {
 }
 
 async function fetchSocialTrends(env) {
-  const fetches = SOCIAL_PLATFORMS.map(({ id, label }) => fetchSocialFeed(id, label));
+  const sources = [
+    ...SOCIAL_PLATFORMS.map(({ id, label }) => ({
+      id,
+      label,
+      fetcher: () => fetchSocialFeed(id, label),
+    })),
+    {
+      id: "hacker-news",
+      label: "Hacker News",
+      fetcher: fetchHackerNewsFeed,
+    },
+    {
+      id: "reddit-ai",
+      label: "Reddit AI",
+      fetcher: fetchRedditAiFeed,
+    },
+  ];
+  const fetches = sources.map((source) => source.fetcher());
   const results = await Promise.allSettled(fetches);
   const allItems = [];
   const platforms = [];
 
   results.forEach((result, index) => {
-    const { id, label } = SOCIAL_PLATFORMS[index];
+    const { id, label } = sources[index];
     if (result.status === "fulfilled" && result.value.length) {
       allItems.push(...result.value);
-      platforms.push({ id, label, items: result.value.slice(0, 5) });
+      platforms.push({
+        id,
+        label,
+        items: rankSocialItemsForDisplay(result.value).slice(0, DEFAULT_SOCIAL_PLATFORM_DISPLAY_LIMIT),
+      });
     }
   });
 
@@ -2120,6 +2208,113 @@ async function fetchSocialTrends(env) {
     items: aiItems,
     platforms,
   };
+}
+
+async function translateSocialPlatformsInNewsContext(env, newsContext) {
+  if (!newsContext || !Array.isArray(newsContext.social_platforms) || !newsContext.social_platforms.length) {
+    return newsContext;
+  }
+  const translatedPlatforms = await translateExternalSocialPlatforms(env, newsContext.social_platforms);
+  if (translatedPlatforms === newsContext.social_platforms) {
+    return newsContext;
+  }
+  return {
+    ...newsContext,
+    social_platforms: translatedPlatforms,
+  };
+}
+
+export async function translateExternalSocialPlatforms(env, platforms) {
+  if (!env || !env.DEEPSEEK_API_KEY || !Array.isArray(platforms) || !platforms.length) {
+    return platforms;
+  }
+
+  const targets = [];
+  platforms.forEach((platform) => {
+    if (!shouldTranslateSocialPlatform(platform && platform.id)) {
+      return;
+    }
+    const items = Array.isArray(platform.items) ? platform.items : [];
+    items.forEach((item, itemIndex) => {
+      const title = sanitizeLine(item && item.title ? item.title : "");
+      if (!title || containsCjkText(title)) {
+        return;
+      }
+      targets.push({
+        key: `${platform.id}:${itemIndex}`,
+        platform: sanitizeLine(platform.label || platform.id || ""),
+        title,
+      });
+    });
+  });
+
+  if (!targets.length) {
+    return platforms;
+  }
+
+  try {
+    const data = await callDeepSeekJson(env, {
+      modelOverride: env.SOCIAL_TRANSLATION_MODEL || env.DEEPSEEK_MODEL || DEEPSEEK_V4_FLASH_MODEL,
+      reasoningEffort: DEEPSEEK_EFFORT_HIGH,
+      maxTokens: 1200,
+      payload: { items: targets },
+      systemLines: [
+        "你是邮件热榜标题翻译器。把 Hacker News 和 Reddit 的英文标题翻译成自然、简洁、完整的中文。",
+        "保留产品名、项目名、公司名、论文名、版本号、数字和常见技术缩写；不要添加事实、评价或解释。",
+        "不要省略关键主体、动作和结果；不要截断标题；不要输出 Markdown。",
+        "只返回 JSON：{\"items\":[{\"key\":\"原 key\",\"title_cn\":\"中文标题\"}]}",
+      ],
+    });
+    const rawItems = Array.isArray(data && data.items)
+      ? data.items
+      : Array.isArray(data && data.translations)
+        ? data.translations
+        : [];
+    const translationMap = new Map();
+    rawItems.forEach((item) => {
+      const key = sanitizeLine(item && item.key ? item.key : "");
+      const title = sanitizeLine(item && (item.title_cn || item.title) ? (item.title_cn || item.title) : "");
+      if (key && title) {
+        translationMap.set(key, title);
+      }
+    });
+
+    if (!translationMap.size) {
+      return platforms;
+    }
+
+    return platforms.map((platform) => {
+      if (!shouldTranslateSocialPlatform(platform && platform.id)) {
+        return platform;
+      }
+      const items = Array.isArray(platform.items) ? platform.items : [];
+      return {
+        ...platform,
+        items: items.map((item, itemIndex) => {
+          const translatedTitle = translationMap.get(`${platform.id}:${itemIndex}`);
+          if (!translatedTitle) {
+            return item;
+          }
+          return {
+            ...item,
+            title_original: sanitizeLine(item.title || ""),
+            title: translatedTitle,
+          };
+        }),
+      };
+    });
+  } catch (error) {
+    console.warn(`translateExternalSocialPlatforms skipped: ${formatError(error)}`);
+    return platforms;
+  }
+}
+
+function shouldTranslateSocialPlatform(platformId) {
+  return SOCIAL_TRANSLATION_PLATFORM_IDS.has(String(platformId || ""));
+}
+
+function containsCjkText(text) {
+  return /[\u3400-\u9fff]/.test(String(text || ""));
 }
 
 async function fetchSocialFeed(platformId, platformLabel) {
@@ -2142,10 +2337,85 @@ async function fetchSocialFeed(platformId, platformLabel) {
         url: sanitizeLine(item.url || item.mobileUrl || ""),
         platform: platformId,
         platform_label: platformLabel,
+        meta: sanitizeLine(item.hot || item.hotValue || item.hot_value || item.desc || ""),
       }))
       .filter((item) => item.title);
   } catch (error) {
     console.error(`fetchSocialFeed(${platformId}) failed: ${formatError(error)}`);
+    return [];
+  }
+}
+
+async function fetchHackerNewsFeed() {
+  try {
+    const response = await fetchWithTimeout(HACKER_NEWS_FRONT_PAGE_URL, {
+      headers: {
+        "user-agent": NEWSNOW_UA,
+        "accept": "application/json",
+      },
+    }, DEFAULT_SOCIAL_TIMEOUT_MS);
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const data = await response.json();
+    const hits = Array.isArray(data && data.hits) ? data.hits : [];
+    return hits
+      .map((item) => {
+        const title = sanitizeLine(item.title || item.story_title || "");
+        const objectId = sanitizeLine(item.objectID || "");
+        const url = sanitizeLine(item.url || item.story_url || (objectId ? `https://news.ycombinator.com/item?id=${objectId}` : ""));
+        const points = Number(item.points);
+        return {
+          title,
+          url,
+          platform: "hacker-news",
+          platform_label: "Hacker News",
+          meta: Number.isFinite(points) ? `${points} points` : "",
+          score: Number.isFinite(points) ? points : 0,
+        };
+      })
+      .filter((item) => item.title);
+  } catch (error) {
+    console.warn(`fetchHackerNewsFeed skipped: ${formatError(error)}`);
+    return [];
+  }
+}
+
+async function fetchRedditAiFeed() {
+  const results = await Promise.allSettled(REDDIT_AI_FEEDS.map(fetchRedditAtomFeed));
+  const items = [];
+  results.forEach((result) => {
+    if (result.status === "fulfilled" && Array.isArray(result.value)) {
+      items.push(...result.value);
+    }
+  });
+  return dedupeSocialItems(items);
+}
+
+async function fetchRedditAtomFeed(feed) {
+  try {
+    const response = await fetchWithTimeout(feed.url, {
+      headers: {
+        "user-agent": "github-digest-worker/1.0",
+        "accept": "application/atom+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5",
+      },
+    }, DEFAULT_REDDIT_TIMEOUT_MS);
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const xml = await response.text();
+    return parseAtomFeedItems(xml)
+      .map((item) => ({
+        title: sanitizeLine(item.title || ""),
+        url: sanitizeLine(item.link || ""),
+        platform: feed.id,
+        platform_label: feed.label,
+        meta: feed.label,
+        published_at: item.published_at || null,
+      }))
+      .filter((item) => item.title);
+  } catch (error) {
+    console.warn(`fetchRedditAtomFeed(${feed.id}) skipped: ${formatError(error)}`);
     return [];
   }
 }
@@ -2161,6 +2431,50 @@ function filterAISocialItems(items) {
       return [...allKeywords].some((kw) => text.includes(normalizeText(kw)));
     })
     .slice(0, DEFAULT_SOCIAL_AI_ITEM_LIMIT);
+}
+
+function rankSocialItemsForDisplay(items) {
+  return dedupeSocialItems(items)
+    .map((item, index) => ({
+      item,
+      index,
+      score: scoreSocialItem(item, index),
+    }))
+    .sort((a, b) => (b.score - a.score) || (a.index - b.index))
+    .map(({ item }) => item);
+}
+
+function dedupeSocialItems(items) {
+  const result = [];
+  const seen = [];
+  (Array.isArray(items) ? items : []).forEach((item) => {
+    const title = sanitizeLine(item && item.title ? item.title : "");
+    if (!title || hasEquivalentNewsTitle(seen, title)) {
+      return;
+    }
+    seen.push(title);
+    result.push({ ...item, title });
+  });
+  return result;
+}
+
+function scoreSocialItem(item, index) {
+  const text = normalizeText(`${item && item.title ? item.title : ""} ${item && item.meta ? item.meta : ""}`);
+  const platform = sanitizeLine(item && item.platform ? item.platform : "");
+  let score = Math.max(0, 100 - index);
+  if ([...new Set([...AI_DOMAIN_TERMS, ...SOCIAL_AI_KEYWORDS])].some((kw) => text.includes(normalizeText(kw)))) {
+    score += 80;
+  }
+  if (/(github|openai|anthropic|claude|deepseek|glm|qwen|agent|mcp|llm|模型|智能体|开源|漏洞|编译器|linux|python|javascript)/i.test(text)) {
+    score += 30;
+  }
+  if (platform === "hacker-news" || platform.startsWith("reddit-")) {
+    score += 15;
+  }
+  if (Number.isFinite(Number(item && item.score))) {
+    score += Math.min(40, Number(item.score) / 25);
+  }
+  return score;
 }
 
 async function fetchJuyaDigest(env, history, now, force) {
@@ -2481,12 +2795,15 @@ function buildNewsSignals(newsContext) {
   const socialText = socialItems.map((item) => item.title).join(" ");
   const entryItems = article && Array.isArray(article.entries) ? article.entries : [];
   const entryText = entryItems
+    .filter((item) => !isSecondaryNewsEntry(item))
+    .slice(0, DEFAULT_PRIMARY_NEWS_RENDER_LIMIT)
     .map((item) => `${item.title || ""} ${item.summary || ""}`)
     .join(" ");
   const aihotItems = newsContext && Array.isArray(newsContext.aihot_updates)
     ? newsContext.aihot_updates
     : [];
   const aihotText = aihotItems
+    .slice(0, DEFAULT_SECONDARY_NEWS_RENDER_LIMIT)
     .map((item) => `${item.title || ""} ${item.summary || ""}`)
     .join(" ");
   const summaryParts = [];
@@ -2672,7 +2989,10 @@ async function summarizeDigestOverview(env, payload) {
         "Focus on practical signal instead of hype.",
         "Do not output scoring numbers, internal system fields, timestamps, or debugging reasons.",
         "Produce one clear subject line, one opening sentence, one bridge sentence, and one overall summary.",
-        "When news.entries are provided, list ALL entry titles in news_section.items_cn — do not skip or truncate any entry.",
+        "When news.entries are provided, curate a dense news_section.items_cn instead of listing everything.",
+        `Use at most ${DEFAULT_PRIMARY_NEWS_RENDER_LIMIT} primary Juya entries plus at most ${DEFAULT_SECONDARY_NEWS_RENDER_LIMIT} source_group=AIHOT supplemental entries.`,
+        "Prefer high-signal product, model, research, security, developer-platform, and open-source items; skip repetitive, tutorial-only, or low-context social snippets.",
+        "For each selected news item, include title plus a one-sentence summary_cn and a tag from the taxonomy when possible.",
         "bridge_cn must be grounded in today's Juya news entries and selected repositories, and should explicitly explain the shared theme in one sentence.",
         "Do not repeat the same news item twice with different wording.",
         "Do not use emoji inside opening, bridge, or overall summary.",
@@ -2686,7 +3006,9 @@ async function summarizeDigestOverview(env, payload) {
         '  "news_section": {',
         '    "items_cn": [',
         "      {",
-        '        "title": string',
+        '        "title": string,',
+        '        "summary_cn": string,',
+        `        "tag": one of ${JSON.stringify(NEWS_TAG_TAXONOMY)}`,
         "      }",
         "    ]",
         "  } | null",
@@ -2896,7 +3218,7 @@ function normalizeOverviewDigest(raw, fallback) {
       summary_cn: sanitizeParagraph(item && item.summary_cn ? item.summary_cn : ""),
       tag: validateNewsTag(item && item.tag ? item.tag : ""),
     }))
-    .filter((item) => item.title && item.summary_cn);
+    .filter((item) => item.title);
   const usedFallback = !sanitizeLine(raw && raw.email_subject ? raw.email_subject : "")
     || !sanitizeLine(raw && raw.opening_cn ? raw.opening_cn : "")
     || !sanitizeParagraph(raw && raw.bridge_cn ? raw.bridge_cn : "")
@@ -2952,9 +3274,11 @@ function compactNewsForOverview(news) {
     published_at: news.published_at || null,
     content_excerpt: sanitizeParagraph(news.content_excerpt || ""),
     entries: Array.isArray(news.entries)
-      ? news.entries.map((entry) => ({
+      ? selectNewsEntriesForOverview(news.entries).map((entry) => ({
           title: sanitizeLine(entry && entry.title ? entry.title : ""),
           summary: sanitizeParagraph(entry && entry.summary ? entry.summary : ""),
+          section: sanitizeLine(entry && entry.section ? entry.section : ""),
+          source_group: sanitizeLine(entry && entry.source_group ? entry.source_group : ""),
         }))
       : [],
     official_updates: Array.isArray(news.official_updates)
@@ -2989,6 +3313,22 @@ function buildProjectSummaryNewsHint(news) {
         }))
       : [],
   };
+}
+
+function selectNewsEntriesForOverview(entries) {
+  const primary = [];
+  const secondary = [];
+  (Array.isArray(entries) ? entries : []).forEach((entry) => {
+    if (isSecondaryNewsEntry(entry)) {
+      secondary.push(entry);
+    } else {
+      primary.push(entry);
+    }
+  });
+  return [
+    ...primary.slice(0, DEFAULT_PRIMARY_NEWS_RENDER_LIMIT),
+    ...secondary.slice(0, DEFAULT_SECONDARY_NEWS_RENDER_LIMIT),
+  ];
 }
 
 function isChineseProjectCopy(text) {
@@ -3045,6 +3385,7 @@ function buildFallbackPositioning(repo) {
   const capability = inferProjectCapability(repo);
   const stack = inferProjectStack(repo);
   const sourceDetail = extractPrimaryProjectSignal(repo);
+  const facts = buildFallbackFactSignals(repo);
 
   if (capability && stack) {
     return `一个围绕${topic}的${projectType}，当前公开信息显示它重点提供${capability}，并主要基于${stack}构建。`;
@@ -3055,11 +3396,28 @@ function buildFallbackPositioning(repo) {
   if (sourceDetail && isChineseProjectCopy(sourceDetail)) {
     return `一个围绕${topic}的${projectType}，当前公开信息主要指向${sourceDetail}。`;
   }
+  if (sourceDetail) {
+    return `一个围绕${topic}的${projectType}，公开描述指向“${sourceDetail}”${facts ? `；${facts}` : "。"}。`;
+  }
   if (topic) {
-    return `一个围绕${topic}的${projectType}，但目前公开资料还不足以判断它是否具备长期可用性。`;
+    return `一个围绕${topic}的${projectType}${facts ? `；${facts}` : ""}。当前输入缺少可用 README 摘要，适合作为观察项而不是直接投入依赖。`;
   }
 
-  return `一个近期热度上升的${projectType}，但目前公开资料有限，更适合先观察定位和成熟度。`;
+  return `一个近期热度上升的${projectType}${facts ? `；${facts}` : ""}。当前输入缺少可用 README 摘要，建议先观察定位和维护信号。`;
+}
+
+function buildFallbackFactSignals(repo) {
+  const facts = [];
+  if (Number(repo.star_delta_24h || 0) > 0) {
+    facts.push(`过去24小时新增 ${repo.star_delta_24h} 星`);
+  }
+  if (Number.isFinite(Number(repo.age_days)) && Number(repo.age_days) <= 14) {
+    facts.push(`创建约 ${Math.max(0, Math.round(Number(repo.age_days)))} 天`);
+  }
+  if (repo.language) {
+    facts.push(`GitHub 标记语言为 ${sanitizeLine(repo.language)}`);
+  }
+  return facts.slice(0, 3).join("，");
 }
 
 function buildFallbackWhyToday(repo) {
@@ -3162,6 +3520,11 @@ function inferProjectCapability(repo) {
     repo.readme_excerpt,
     Array.isArray(repo.topics) ? repo.topics.join(" ") : "",
   ].join(" "));
+  const strongDesignCorpus = normalizeText([
+    repo.full_name,
+    repo.description,
+    Array.isArray(repo.topics) ? repo.topics.join(" ") : "",
+  ].join(" "));
   if (/cms|content management|wordpress|astro/.test(corpus)) {
     return "更现代的内容管理与站点构建能力";
   }
@@ -3171,7 +3534,7 @@ function inferProjectCapability(repo) {
   if (/multi agent|multi-agent|team/.test(corpus)) {
     return "多智能体任务拆解与协同执行";
   }
-  if (/design md|design-md|design system|ui/.test(corpus)) {
+  if (/design md|design-md|design-system|open-design/.test(strongDesignCorpus)) {
     return "设计规范资料，便于 agent 复刻界面风格";
   }
   if (/open-source coding-agent cli|coding-agent|codex|claude code|copilot cli|cli/.test(corpus)) {
@@ -3187,8 +3550,11 @@ function inferProjectCapability(repo) {
 }
 
 function inferProjectStack(repo) {
+  const primaryLanguage = sanitizeLine(repo.language || "");
+  if (primaryLanguage) {
+    return primaryLanguage;
+  }
   const corpus = normalizeText([
-    repo.language,
     repo.description,
     repo.readme_excerpt,
   ].join(" "));
@@ -3389,10 +3755,15 @@ function buildEmailPayload(input) {
 
   const socialPlatformsText = input.news && Array.isArray(input.news.social_platforms) ? input.news.social_platforms : [];
   if (socialPlatformsText.length) {
-    lines.push("📊 今日国内热榜");
-    socialPlatformsText.forEach(({ label, items }) => {
+    lines.push("📊 社媒与社区热榜");
+    socialPlatformsText.forEach(({ id, label, items }) => {
       lines.push(`${label}`);
-      items.forEach((item, i) => lines.push(`${i + 1}. ${sanitizeLine(item.title)}`));
+      items.slice(0, DEFAULT_SOCIAL_PLATFORM_DISPLAY_LIMIT).forEach((item, i) => {
+        const meta = sanitizeLine(item.meta || "");
+        const platformId = item && item.platform ? item.platform : id;
+        const url = shouldTranslateSocialPlatform(platformId) ? sanitizeLine(item.url || "") : "";
+        lines.push(`${i + 1}. ${sanitizeLine(item.title)}${meta ? ` (${meta})` : ""}${url ? ` - ${url}` : ""}`);
+      });
       lines.push("");
     });
   }
@@ -3599,15 +3970,18 @@ function renderOfficialUpdateCard(item) {
   ].join("");
 }
 
-function buildDomesticTrendingSection(platforms) {
-  const renderCol = ({ label, items }) => {
-    const rows = items.map((item, i) => {
-      const title = truncateText(sanitizeLine(item.title), 30);
+export function buildDomesticTrendingSection(platforms) {
+  const renderCol = ({ id, label, items }) => {
+    const rows = items.slice(0, DEFAULT_SOCIAL_PLATFORM_DISPLAY_LIMIT).map((item, i) => {
+      const fullTitle = shouldRenderFullSocialTitle(item, id);
+      const title = fullTitle ? sanitizeLine(item.title) : truncateText(sanitizeLine(item.title), 30);
+      const meta = truncateText(sanitizeLine(item.meta || ""), 22);
       const rankStyle = "display:inline-block;width:18px;text-align:right;margin-right:8px;color:#d1d5db;font-size:13px;font-weight:700;";
-      const titleStyle = `font-size:14px;line-height:1.5;color:${i < 3 ? "#111827" : "#374151"};font-weight:${i < 3 ? "600" : "400"};`;
-      const rowStyle = "padding:7px 0;border-bottom:1px solid #f3f4f6;";
-      const inner = `<span style="${rankStyle}">${i + 1}</span><span style="${titleStyle}">${escapeHtml(title)}</span>`;
-      return `<div style="${rowStyle}">${item.url ? `<a href="${escapeAttribute(item.url)}" style="display:block;text-decoration:none;">${inner}</a>` : inner}</div>`;
+      const titleStyle = `font-size:14px;line-height:1.5;color:${i < 3 ? "#111827" : "#374151"};font-weight:${i < 3 ? "600" : "400"};word-break:break-word;overflow-wrap:anywhere;`;
+      const metaStyle = "margin-left:26px;margin-top:2px;color:#9ca3af;font-size:12px;line-height:1.35;";
+      const rowStyle = "padding:7px 0;border-bottom:1px solid #f3f4f6;word-break:break-word;overflow-wrap:anywhere;";
+      const inner = `<span style="${rankStyle}">${i + 1}</span><span style="${titleStyle}">${escapeHtml(title)}</span>${meta ? `<div style="${metaStyle}">${escapeHtml(meta)}</div>` : ""}`;
+      return `<div style="${rowStyle}">${item.url ? `<a href="${escapeAttribute(item.url)}" style="display:block;text-decoration:none;word-break:break-word;overflow-wrap:anywhere;">${inner}</a>` : inner}</div>`;
     }).join("");
     return `<td style="width:50%;vertical-align:top;padding:0 8px;">
       <div style="font-size:12px;font-weight:800;color:#9ca3af;letter-spacing:0.05em;margin-bottom:8px;">${escapeHtml(label)}</div>
@@ -3629,10 +4003,14 @@ function buildDomesticTrendingSection(platforms) {
 
   return [
     `<section style="${sectionStyle()}">`,
-    `<div style="${sectionTitleStyle()}">📊 今日国内热榜</div>`,
+    `<div style="${sectionTitleStyle()}">📊 社媒与社区热榜</div>`,
     `<table width="100%" cellpadding="0" cellspacing="0" border="0">${rows.join("")}</table>`,
     `</section>`,
   ].join("");
+}
+
+function shouldRenderFullSocialTitle(item, platformId) {
+  return shouldTranslateSocialPlatform(item && item.platform ? item.platform : platformId);
 }
 
 function buildHtmlNewsCards(rawEntries, aiItems) {
@@ -3649,7 +4027,7 @@ function buildHtmlNewsCards(rawEntries, aiItems) {
   const cards = [];
   const seen = [];
 
-  (rawEntries || []).forEach((entry) => {
+  selectRenderableRawEntries(rawEntries || []).forEach((entry) => {
     const title = sanitizeLine(entry && entry.title ? entry.title : "");
     if (!title || hasEquivalentNewsTitle(seen, title)) {
       return;
@@ -3658,12 +4036,14 @@ function buildHtmlNewsCards(rawEntries, aiItems) {
     const key = canonicalNewsKey(title);
     cards.push(renderNewsCard({
       title,
-      summary_cn: sanitizeParagraph(entry.summary || "") || summaryMap.get(key) || "详见原文",
+      summary_cn: truncateText(summaryMap.get(key) || sanitizeParagraph(entry.summary || "") || "详见原文", 180),
       tag: entry.section || tagMap.get(key) || "行业动态",
       link: entry.link || "",
       image_url: entry.image_url || "",
       image_urls: Array.isArray(entry.image_urls) ? entry.image_urls : [],
       source_links: Array.isArray(entry.source_links) ? entry.source_links : [],
+      source: entry.source || "",
+      is_secondary: Boolean(entry.is_secondary),
     }));
   });
 
@@ -3678,6 +4058,22 @@ function buildHtmlNewsCards(rawEntries, aiItems) {
   }
 
   return cards.join("");
+}
+
+function selectRenderableRawEntries(entries) {
+  const primary = [];
+  const secondary = [];
+  (Array.isArray(entries) ? entries : []).forEach((entry) => {
+    if (isSecondaryNewsEntry(entry)) {
+      secondary.push(entry);
+    } else {
+      primary.push(entry);
+    }
+  });
+  return [
+    ...primary.slice(0, DEFAULT_PRIMARY_NEWS_RENDER_LIMIT),
+    ...secondary.slice(0, DEFAULT_SECONDARY_NEWS_RENDER_LIMIT),
+  ];
 }
 
 function renderNewsImages(item) {
@@ -3705,7 +4101,7 @@ function renderProjectCard(repo, ai, index, deliverability = { rewrites: [] }) {
     ? `<div style="margin-top:12px;padding:12px 14px;border-radius:12px;background:#fff7ed;color:#9a3412;font-size:14px;line-height:1.6;">⚠️ ${escapeHtml(copy.risk)}</div>`
     : "";
   const fallbackNote = isFallback
-    ? `<div style="margin-top:6px;font-size:11px;color:#9ca3af;">（摘要自动生成）</div>`
+    ? `<div style="margin-top:6px;font-size:11px;color:#9ca3af;">（本地兜底摘要）</div>`
     : "";
   const signalLine = buildProjectSignalLine(repo);
 
@@ -4234,15 +4630,16 @@ function collectRenderableNewsItems(aiNews, freshNews) {
   const items = [];
   const seenTitles = [];
   const rawEntries = freshNews && Array.isArray(freshNews.entries) ? freshNews.entries : [];
+  const selectedRawEntries = selectRenderableRawEntries(rawEntries);
 
   const aiItems = aiNews && Array.isArray(aiNews.items_cn) ? aiNews.items_cn : [];
-  aiItems.forEach((item) => {
+  aiItems.slice(0, DEFAULT_PRIMARY_NEWS_RENDER_LIMIT + DEFAULT_SECONDARY_NEWS_RENDER_LIMIT).forEach((item) => {
     const title = sanitizeLine(item && item.title ? item.title : "");
     if (!title || hasEquivalentNewsTitle(seenTitles, title)) {
       return;
     }
     seenTitles.push(title);
-    const matchedRaw = findMatchingRawEntry(rawEntries, title);
+    const matchedRaw = findMatchingRawEntry(selectedRawEntries, title);
     const summary = (matchedRaw && matchedRaw.summary)
       ? sanitizeParagraph(matchedRaw.summary)
       : sanitizeParagraph(item && item.summary_cn ? item.summary_cn : "");
@@ -4251,16 +4648,18 @@ function collectRenderableNewsItems(aiNews, freshNews) {
       : validateNewsTag(item && item.tag ? item.tag : "");
     items.push({
       title,
-      summary_cn: summary || "详见原文",
+      summary_cn: truncateText(sanitizeParagraph(item && item.summary_cn ? item.summary_cn : "") || summary || "详见原文", 180),
       tag,
       link: matchedRaw && matchedRaw.link ? matchedRaw.link : "",
       image_url: matchedRaw && matchedRaw.image_url ? matchedRaw.image_url : "",
       image_urls: matchedRaw && Array.isArray(matchedRaw.image_urls) ? matchedRaw.image_urls : [],
       source_links: matchedRaw && Array.isArray(matchedRaw.source_links) ? matchedRaw.source_links : [],
+      source: matchedRaw && matchedRaw.source ? matchedRaw.source : "",
+      is_secondary: Boolean(matchedRaw && matchedRaw.is_secondary),
     });
   });
 
-  rawEntries.forEach((entry) => {
+  selectedRawEntries.forEach((entry) => {
     const title = sanitizeLine(entry && entry.title ? entry.title : "");
     if (!title || hasEquivalentNewsTitle(seenTitles, title)) {
       return;
@@ -4268,16 +4667,22 @@ function collectRenderableNewsItems(aiNews, freshNews) {
     seenTitles.push(title);
     items.push({
       title,
-      summary_cn: sanitizeParagraph(entry.summary || "") || "详见原文",
+      summary_cn: truncateText(sanitizeParagraph(entry.summary || "") || "详见原文", 180),
       tag: entry.section || "行业动态",
       link: entry.link || "",
       image_url: entry.image_url || "",
       image_urls: Array.isArray(entry.image_urls) ? entry.image_urls : [],
       source_links: Array.isArray(entry.source_links) ? entry.source_links : [],
+      source: entry.source || "",
+      is_secondary: Boolean(entry.is_secondary),
     });
   });
 
   return items;
+}
+
+function isSecondaryNewsEntry(entry) {
+  return Boolean(entry && (entry.is_secondary || sanitizeLine(entry.source_group || "").toUpperCase() === "AIHOT"));
 }
 
 

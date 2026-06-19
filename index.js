@@ -26,7 +26,6 @@ const DEFAULT_MAX_PROJECTS = 15;
 const DEFAULT_GITHUB_PAGES = 2;
 const README_CHAR_LIMIT = 2500;
 const DEFAULT_PROJECT_SUMMARY_BATCH_SIZE = 5;
-const PER_REPO_SUMMARY_CONCURRENCY = 5;
 // Keep GitHub Search bursts modest to stay clear of secondary rate limits.
 const SEARCH_PLAN_CONCURRENCY = 3;
 const NEWS_TAG_TAXONOMY = ["模型发布", "产品更新", "开源发布", "研究突破", "安全漏洞", "行业动态", "工具发布"];
@@ -78,7 +77,7 @@ const SOCIAL_AI_KEYWORDS = [
 const PROJECT_SUMMARY_README_LIMIT = 1400;
 const DEFAULT_RELEASE_CANDIDATE_LIMIT = 2;
 const DEFAULT_README_ENRICH_LIMIT = 12;
-const DEFAULT_TRENDING_CANDIDATE_LIMIT = 25;
+const DEFAULT_TRENDING_CANDIDATE_LIMIT = 20;
 const QUALIFICATION_BUCKET_PRIORITY = {
   core: 0,
   reference: 1,
@@ -2557,7 +2556,7 @@ async function fetchReadme(env, fullName) {
 
 async function summarizeDigest(env, payload) {
   const overview = await summarizeDigestOverview(env, payload);
-  const projectDigest = await summarizeProjectDigestsParallel(env, payload);
+  const projectDigest = await summarizeProjectDigests(env, payload);
 
   return {
     email_subject: overview.email_subject,
@@ -2642,6 +2641,7 @@ async function summarizeProjectDigests(env, payload) {
 
   for (const batch of batches) {
     let batchResults;
+    let batchError = "";
 
     try {
       batchResults = await summarizeProjectBatch(env, {
@@ -2652,13 +2652,16 @@ async function summarizeProjectDigests(env, payload) {
         news: buildProjectSummaryNewsHint(payload.news),
       });
     } catch (error) {
-      batchResults = batch.map((repo) => buildFallbackProjectSummary(repo, `project-batch-error: ${formatError(error)}`));
+      batchError = formatError(error);
+      batchResults = batch.map((repo) => buildFallbackProjectSummary(repo, `project-batch-error: ${batchError}`));
     }
 
-    const retryRepos = batchResults
-      .filter((item) => item.__fallback)
-      .map((item) => batch.find((repo) => repo.full_name === item.full_name))
-      .filter(Boolean);
+    const retryRepos = batchError
+      ? []
+      : batchResults
+        .filter((item) => item.__fallback)
+        .map((item) => batch.find((repo) => repo.full_name === item.full_name))
+        .filter(Boolean);
 
     if (retryRepos.length > 0) {
       const retryBatchSize = retryRepos.length === batch.length
@@ -2733,6 +2736,7 @@ async function summarizeProjectBatch(env, payload) {
       "Never omit a repository and never use an empty string for positioning_cn.",
       "risk_cn may be an empty string only when there is no concrete legal, dependency, integrity, or abnormal-signal risk.",
       "Write concise, readable Chinese for email.",
+      "Every human-facing field ending in _cn must be written in Chinese. Keep repository names, product names, code identifiers, and programming language names as-is, but do not write English prose.",
       "Each project needs one richer positioning block and risk only when real.",
       "positioning_cn should usually contain 2 short sentences: first explain what the project actually does, then explain its likely use case, target user, or differentiator.",
       "Do not simply translate or lightly paraphrase the GitHub description.",
@@ -2769,104 +2773,6 @@ async function summarizeProjectBatch(env, payload) {
   });
 
   return requested.map((repo) => resultMap.get(repo.full_name) || buildFallbackProjectSummary(repo, "missing-model-entry"));
-}
-
-async function callDeepSeekSingleRepo(env, repo, newsHint) {
-  const newsTitles = newsHint
-    ? [
-        ...(Array.isArray(newsHint.entries) ? newsHint.entries.map((e) => sanitizeLine(e.title || "")).filter(Boolean) : []),
-        ...(Array.isArray(newsHint.official_updates) ? newsHint.official_updates.map((e) => sanitizeLine(e.title || "")).filter(Boolean) : []),
-      ].slice(0, 10)
-    : [];
-
-  const repoInput = {
-    full_name: repo.full_name,
-    description: repo.description || "",
-    language: repo.language || "",
-    stars: repo.stars,
-    star_delta_24h: repo.star_delta_24h,
-    forks: repo.forks,
-    created_at: repo.created_at,
-    pushed_at: repo.pushed_at,
-    homepage: repo.homepage || "",
-    topics: Array.isArray(repo.topics) ? repo.topics : [],
-    has_recent_release: Boolean(repo.has_recent_release),
-    release_name: repo.recent_release && repo.recent_release.name ? repo.recent_release.name : "",
-    selection_context: buildRepositorySelectionContext(repo),
-    risk_hints: inferProjectRisk(repo),
-    readme_excerpt: String(repo.readme_excerpt || "").slice(0, PROJECT_SUMMARY_README_LIMIT),
-  };
-
-  try {
-    const data = await callDeepSeekJson(env, {
-      modelOverride: getProjectSummaryModel(env),
-      reasoningEffort: getProjectSummaryReasoningEffort(env),
-      maxTokens: 1000,
-      payload: { repository: repoInput, news_titles: newsTitles },
-      systemLines: [
-        "You generate a Chinese project summary for an email digest.",
-        "Return JSON only.",
-        "Do not invent facts beyond the provided repository metadata and README excerpt.",
-        "positioning_cn: 2-3 sentences in Chinese. Lead with the single most concrete and distinctive thing about this project — its actual capability, unique angle, or why it matters right now. Do not follow a fixed sentence structure; find the most interesting entry point from the data. Do not open with 这是一个 or 该项目是一个.",
-        "risk_cn: one concrete sentence about a legal, dependency, integrity, or security risk. Empty string if no real risk.",
-        "Do not invent risks. If risk_hints is empty or generic, keep risk_cn as empty string.",
-        "Do not use emoji in any field.",
-        "Never leak internal phrases like selection context, momentum score, or ranking reasons.",
-        'Output schema: { "positioning_cn": string, "risk_cn": string }',
-      ],
-    });
-    return normalizeProjectSummaryItem(repo, data);
-  } catch (error) {
-    return buildFallbackProjectSummary(repo, `single-repo-error: ${formatError(error)}`);
-  }
-}
-
-async function summarizeProjectDigestsParallel(env, payload) {
-  const repositories = Array.isArray(payload.repositories) ? payload.repositories : [];
-  if (!repositories.length) {
-    return { projects: [], batch_count: 0, fallback_count: 0, missing_projects: [], fallback_reasons: [] };
-  }
-
-  const newsHint = buildProjectSummaryNewsHint(payload.news);
-  const limit = createConcurrencyLimiter(PER_REPO_SUMMARY_CONCURRENCY);
-
-  const results = await Promise.allSettled(
-    repositories.map((repo) => limit(() => callDeepSeekSingleRepo(env, repo, newsHint))),
-  );
-
-  const projects = [];
-  let fallbackCount = 0;
-  const missingProjects = [];
-  const fallbackReasons = [];
-
-  results.forEach((result, index) => {
-    const repo = repositories[index];
-    if (result.status === "fulfilled") {
-      const item = result.value;
-      if (item.__fallback) {
-        fallbackCount += 1;
-        missingProjects.push(repo.full_name);
-        if (item.__fallback_reason) {
-          fallbackReasons.push(`${repo.full_name}: ${item.__fallback_reason}`);
-        }
-      }
-      projects.push(stripProjectSummaryDebug(item));
-    } else {
-      fallbackCount += 1;
-      missingProjects.push(repo.full_name);
-      const reason = `call-rejected: ${formatError(result.reason)}`;
-      fallbackReasons.push(`${repo.full_name}: ${reason}`);
-      projects.push(stripProjectSummaryDebug(buildFallbackProjectSummary(repo, reason)));
-    }
-  });
-
-  return {
-    projects,
-    batch_count: repositories.length,
-    fallback_count: fallbackCount,
-    missing_projects: Array.from(new Set(missingProjects)),
-    fallback_reasons: Array.from(new Set(fallbackReasons)).slice(0, 12),
-  };
 }
 
 async function callDeepSeekJson(env, options) {
@@ -3013,11 +2919,27 @@ function buildProjectSummaryNewsHint(news) {
   };
 }
 
-function normalizeProjectSummaryItem(repo, item) {
+function isChineseProjectCopy(text) {
+  const cleaned = sanitizeParagraph(text);
+  if (!cleaned) {
+    return false;
+  }
+
+  const chineseCount = (cleaned.match(/[\u3400-\u9fff]/g) || []).length;
+  if (chineseCount === 0) {
+    return false;
+  }
+
+  const latinWords = cleaned.match(/[A-Za-z][A-Za-z0-9+.#-]*/g) || [];
+  return chineseCount >= 6 || latinWords.length < 3;
+}
+
+export function normalizeProjectSummaryItem(repo, item) {
   const fallback = buildFallbackProjectSummary(repo, "incomplete-model-entry");
-  const positioning = sanitizeParagraph(item && item.positioning_cn ? item.positioning_cn : "");
+  const rawPositioning = sanitizeParagraph(item && item.positioning_cn ? item.positioning_cn : "");
+  const positioning = isChineseProjectCopy(rawPositioning) ? rawPositioning : "";
   const rawRisk = sanitizeParagraph(item && item.risk_cn ? item.risk_cn : "");
-  const risk = isMeaningfulRisk(rawRisk) ? rawRisk : "";
+  const risk = isMeaningfulRisk(rawRisk) && isChineseProjectCopy(rawRisk) ? rawRisk : "";
   const usedFallback = !positioning;
 
   return {
@@ -3027,11 +2949,13 @@ function normalizeProjectSummaryItem(repo, item) {
     action_cn: "",
     risk_cn: risk || fallback.risk_cn,
     __fallback: usedFallback,
-    __fallback_reason: usedFallback ? "incomplete-model-entry" : "",
+    __fallback_reason: usedFallback
+      ? (rawPositioning ? "non-chinese-model-entry" : "incomplete-model-entry")
+      : "",
   };
 }
 
-function buildFallbackProjectSummary(repo, reason = "") {
+export function buildFallbackProjectSummary(repo, reason = "") {
   return {
     full_name: repo.full_name,
     positioning_cn: buildFallbackPositioning(repo),
@@ -3044,16 +2968,26 @@ function buildFallbackProjectSummary(repo, reason = "") {
 }
 
 function buildFallbackPositioning(repo) {
-  const desc = sanitizeParagraph(repo.description || "");
-  if (desc) {
-    return desc;
-  }
   const projectType = inferProjectType(repo);
   const topic = inferRepositoryTopic(repo);
-  if (topic) {
-    return `一个与 ${topic} 相关的${projectType}，详细信息请查看原项目页面。`;
+  const capability = inferProjectCapability(repo);
+  const stack = inferProjectStack(repo);
+  const sourceDetail = extractPrimaryProjectSignal(repo);
+
+  if (capability && stack) {
+    return `一个围绕${topic}的${projectType}，当前公开信息显示它重点提供${capability}，并主要基于${stack}构建。`;
   }
-  return `一个近期热度上升的${projectType}，详细信息请查看原项目页面。`;
+  if (capability) {
+    return `一个围绕${topic}的${projectType}，当前公开信息显示它重点提供${capability}。`;
+  }
+  if (sourceDetail && isChineseProjectCopy(sourceDetail)) {
+    return `一个围绕${topic}的${projectType}，当前公开信息主要指向${sourceDetail}。`;
+  }
+  if (topic) {
+    return `一个围绕${topic}的${projectType}，但目前公开资料还不足以判断它是否具备长期可用性。`;
+  }
+
+  return `一个近期热度上升的${projectType}，但目前公开资料有限，更适合先观察定位和成熟度。`;
 }
 
 function buildFallbackWhyToday(repo) {
@@ -3274,7 +3208,10 @@ function buildDeliverabilityPlan(repositories, aiByRepo) {
 }
 
 function getDeliverableProjectCopy(repo, ai, fallbackAi, deliverability) {
-  const rawPositioning = sanitizeParagraph(ai.positioning_cn || ai.tagline_cn || fallbackAi.positioning_cn);
+  const aiPositioning = sanitizeParagraph(ai.positioning_cn || ai.tagline_cn || "");
+  const rawPositioning = isChineseProjectCopy(aiPositioning)
+    ? aiPositioning
+    : sanitizeParagraph(fallbackAi.positioning_cn);
   const rawRisk = extractRiskText(ai) || fallbackAi.risk_cn;
   const onRewrite = (field) => (rewrite) => {
     appendDeliverabilityRewrite(deliverability, repo.full_name, field, rewrite);
@@ -4544,14 +4481,14 @@ function truncateText(text, limit) {
 
 function extractRiskText(ai) {
   const direct = sanitizeParagraph(ai && ai.risk_cn ? ai.risk_cn : "");
-  if (isMeaningfulRisk(direct)) {
+  if (isMeaningfulRisk(direct) && isChineseProjectCopy(direct)) {
     return direct;
   }
 
   const risks = Array.isArray(ai && ai.risks_cn) ? ai.risks_cn : [];
   for (const risk of risks) {
     const cleaned = sanitizeParagraph(risk);
-    if (isMeaningfulRisk(cleaned)) {
+    if (isMeaningfulRisk(cleaned) && isChineseProjectCopy(cleaned)) {
       return cleaned;
     }
   }

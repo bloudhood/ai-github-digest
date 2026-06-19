@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   buildFallbackProjectSummary,
+  enrichProjects,
   normalizeProjectSummaryItem,
   rewriteDeliverabilityText,
 } from "../index.js";
@@ -76,4 +77,67 @@ test("rejects English model project summaries and falls back to Chinese copy", (
   assert.match(normalized.positioning_cn, /[\u3400-\u9fff]/);
   assert.doesNotMatch(normalized.positioning_cn, /^A command-line router/i);
   assert.equal(normalized.risk_cn, "");
+});
+
+test("fallback summaries use factual observation copy instead of vague public-info wording", () => {
+  const fallback = buildFallbackProjectSummary({
+    full_name: "shadcn/improve",
+    name: "improve",
+    description: "",
+    language: "",
+    topics: [],
+    readme_excerpt: "",
+    star_delta_24h: 129,
+    age_days: 9,
+    hours_since_push: 72,
+    authenticity_score: 20,
+  });
+
+  assert.match(fallback.positioning_cn, /过去24小时新增 129 星/);
+  assert.match(fallback.positioning_cn, /观察项/);
+  assert.doesNotMatch(fallback.positioning_cn, /公开资料还不足以判断它是否具备长期可用性/);
+});
+
+test("fallback stack inference trusts GitHub language before README keywords", () => {
+  const fallback = buildFallbackProjectSummary({
+    full_name: "example/swift-agent",
+    name: "swift-agent",
+    description: "A Swift app with generated Go examples in docs.",
+    language: "Swift",
+    topics: ["agent"],
+    readme_excerpt: "Install go tools only when exporting examples.",
+    star_delta_24h: 20,
+    age_days: 20,
+    hours_since_push: 3,
+    authenticity_score: 20,
+  });
+
+  assert.match(fallback.positioning_cn, /主要基于Swift构建/);
+  assert.doesNotMatch(fallback.positioning_cn, /主要基于Go构建/);
+});
+
+test("enriches every displayed project by default", async () => {
+  const originalFetch = globalThis.fetch;
+  const repos = Array.from({ length: 15 }, (_, index) => ({
+    full_name: `owner/repo-${index + 1}`,
+    name: `repo-${index + 1}`,
+  }));
+  globalThis.fetch = async (url) => {
+    const repo = String(url).match(/repos\/([^/]+\/[^/]+)\/readme/)[1];
+    return new Response(JSON.stringify({
+      content: Buffer.from(`# ${repo}\n\nREADME content`).toString("base64"),
+      encoding: "base64",
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    const enriched = await enrichProjects({}, repos);
+    assert.equal(enriched.length, 15);
+    assert.ok(enriched.every((repo) => repo.readme_excerpt.includes("README content")));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

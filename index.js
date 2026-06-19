@@ -86,6 +86,7 @@ const SOCIAL_AI_KEYWORDS = [
   "ai", "llm", "agent", "gpt", "算法", "模型", "训练",
 ];
 const PROJECT_SUMMARY_README_LIMIT = 1400;
+const PROJECT_POSITIONING_CHAR_LIMIT = 170;
 const DEFAULT_RELEASE_CANDIDATE_LIMIT = 0;
 const DEFAULT_README_ENRICH_LIMIT = 8;
 const DEFAULT_TRENDING_CANDIDATE_LIMIT = 8;
@@ -3224,15 +3225,14 @@ async function summarizeProjectBatch(env, payload) {
       "risk_cn may be an empty string only when there is no concrete legal, dependency, integrity, or abnormal-signal risk.",
       "Write concise, analytical Chinese for email.",
       "Every human-facing field ending in _cn must be written in Chinese. Keep repository names, product names, code identifiers, and programming language names as-is, but do not write English prose.",
-      "Each positioning_cn must help a reader quickly decide what the project is and why it matters.",
-      "Use this compact structure inside positioning_cn: 定位：...。价值：...。看点：...。注意：...。",
-      "定位 should name the concrete category or product shape, not repeat stars, language, or freshness.",
-      "价值 should explain the practical use case, target user, or differentiator in one short sentence.",
-      "看点 should use star_delta_24h, age, update/release, forks, topic match, readme_lead, or signal_hint to explain why it is worth opening today.",
-      "注意 should mention the main adoption caveat from input, or say 适合先看 README/示例/维护节奏。",
+      "Each positioning_cn must help a reader quickly understand what the repository is.",
+      "Write natural prose, not a labeled template. Do not use section labels such as 定位、价值、看点、注意、今日信号.",
+      "Use 1-2 compact Chinese sentences. First sentence: concrete project shape and main capability. Second sentence: likely user/use case or one concrete differentiator.",
+      "Mention freshness, star_delta_24h, release, forks, or topic match only when it helps explain why a reader should open the project.",
       "Do not simply translate, lightly paraphrase, or restate the GitHub description/README.",
       "Do not write generic phrases like 当前公开信息显示, 重点提供, 围绕某主题, 值得关注, or 快速上升 unless tied to a concrete value.",
-      "Project body should stay within 4 compact Chinese clauses/sentences total.",
+      "Do not put adoption caveats inside positioning_cn unless they are needed to understand the project. Put concrete risk only in risk_cn.",
+      `positioning_cn should usually stay under ${PROJECT_POSITIONING_CHAR_LIMIT} Chinese characters.`,
       "Avoid repetitive openers such as 这是一个 / 该项目是一个; start directly from the concrete category or capability when possible.",
       "If risk_hints is empty, keep risk_cn empty and do not invent new legal, privacy, or compliance risks.",
       "When information is limited, say it was not confirmed from the input instead of leaving fields blank.",
@@ -3447,7 +3447,7 @@ function isChineseProjectCopy(text) {
 export function normalizeProjectSummaryItem(repo, item) {
   const fallback = buildFallbackProjectSummary(repo, "incomplete-model-entry");
   const rawPositioning = sanitizeParagraph(item && item.positioning_cn ? item.positioning_cn : "");
-  const positioning = isChineseProjectCopy(rawPositioning) ? rawPositioning : "";
+  const positioning = isChineseProjectCopy(rawPositioning) ? normalizeProjectPositioningCopy(rawPositioning) : "";
   const rawRisk = sanitizeParagraph(item && item.risk_cn ? item.risk_cn : "");
   const risk = isMeaningfulRisk(rawRisk) && isChineseProjectCopy(rawRisk) ? rawRisk : "";
   const usedFallback = !positioning;
@@ -3483,18 +3483,22 @@ function buildFallbackPositioning(repo) {
   const capability = inferProjectCapability(repo);
   const stack = inferProjectStack(repo);
   const sourceDetail = extractPrimaryProjectSignal(repo);
-  const facts = buildFallbackFactSignals(repo);
-  const category = buildProjectCategoryLabel(topic, projectType, stack);
-  const value = buildFallbackValueAnalysis(repo, capability, sourceDetail);
-  const signal = buildFallbackSignalAnalysis(repo);
-  const caveat = buildFallbackCaveat(repo);
+  const category = buildNaturalProjectCategoryLabel(topic, projectType, stack);
+  const normalizedCapability = normalizeFallbackCapability(capability, projectType);
+  const useCase = buildFallbackUseCase(repo);
+  let what = "";
 
-  return [
-    `定位：${category}。`,
-    `价值：${value}`,
-    `看点：${signal}`,
-    `注意：${caveat}${facts ? `（${facts}）` : ""}。`,
-  ].join("");
+  if (normalizedCapability) {
+    what = `${category}，核心是${normalizedCapability}。`;
+  } else if (sourceDetail && isChineseProjectCopy(sourceDetail)) {
+    what = `${category}，README 或描述主要指向${sourceDetail}。`;
+  } else if (sourceDetail) {
+    what = `${category}。`;
+  } else {
+    what = `${buildUnknownProjectObservation(repo, category)}。`;
+  }
+
+  return normalizeProjectPositioningCopy(`${what}${useCase}`);
 }
 
 function buildFallbackFactSignals(repo) {
@@ -3515,6 +3519,44 @@ function buildProjectCategoryLabel(topic, projectType, stack) {
   const parts = [topic, projectType].filter(Boolean);
   const category = parts.length ? parts.join(" / ") : "近期热度上升项目";
   return stack ? `${category}，${stack}` : category;
+}
+
+function buildNaturalProjectCategoryLabel(topic, projectType, stack) {
+  const normalizedType = projectType === "开发工具" ? "工具" : projectType;
+  const topicLabel = topic && topic !== "AI 开发工具" ? ` ${topic}` : "";
+  if (stack && normalizedType) {
+    return topicLabel
+      ? `${stack} ${normalizedType}，面向${topicLabel}`
+      : `${stack} ${normalizedType}`;
+  }
+  if (topicLabel) {
+    return `面向${topicLabel}的${normalizedType || "项目"}`;
+  }
+  return normalizedType || "近期热度上升项目";
+}
+
+function normalizeFallbackCapability(capability, projectType) {
+  const cleaned = sanitizeLine(capability);
+  if (!cleaned) {
+    return "";
+  }
+  if (projectType !== "资料型项目" && projectType !== "资料集合" && /文档|教程|知识整理/.test(cleaned)) {
+    return "";
+  }
+  return cleaned;
+}
+
+function buildUnknownProjectObservation(repo, category) {
+  const owner = sanitizeLine(String(repo.full_name || "").split("/")[0] || "");
+  const name = sanitizeLine(repo.name || String(repo.full_name || "").split("/")[1] || "仓库");
+  const ownerPrefix = owner ? `${owner} 账号下的 ` : "";
+  if (Number(repo.star_delta_24h || 0) >= 100) {
+    return `${ownerPrefix}${name} 是短时间热度明显上升的${category}`;
+  }
+  if (Number.isFinite(Number(repo.age_days)) && Number(repo.age_days) <= 14) {
+    return `${ownerPrefix}${name} 是刚出现不久的${category}`;
+  }
+  return `${ownerPrefix}${name} 是近期进入候选池的${category}`;
 }
 
 function buildFallbackValueAnalysis(repo, capability, sourceDetail) {
@@ -3662,16 +3704,33 @@ function inferRepositoryTopic(repo) {
 }
 
 function inferProjectType(repo) {
+  const strongCorpus = normalizeText([
+    repo.full_name,
+    repo.description,
+    Array.isArray(repo.topics) ? repo.topics.join(" ") : "",
+  ].join(" "));
   const corpus = normalizeText([
     repo.full_name,
     repo.description,
     repo.readme_excerpt,
     Array.isArray(repo.topics) ? repo.topics.join(" ") : "",
   ].join(" "));
-  if (/(book|guide|tutorial|course|learn|docs|documentation|manual)/i.test(corpus)) {
+  if (/(cms|app|platform|dashboard)/i.test(strongCorpus)) {
+    return "应用型项目";
+  }
+  if (/(cli|command line|terminal)/i.test(strongCorpus)) {
+    return "命令行工具";
+  }
+  if (/(plugin|extension|integration)/i.test(strongCorpus)) {
+    return "插件型工具";
+  }
+  if (/(sdk|framework|library|package|toolkit)/i.test(strongCorpus)) {
+    return "开发框架";
+  }
+  if (/(book|guide|tutorial|course|learn|docs|documentation|manual)/i.test(strongCorpus)) {
     return "资料型项目";
   }
-  if (/(awesome|collection|curated|design md|design-md|examples|template)/i.test(corpus)) {
+  if (/(awesome|collection|curated|design md|design-md|examples|template)/i.test(strongCorpus)) {
     return "资料集合";
   }
   if (/(sdk|framework|library|package|toolkit)/i.test(corpus)) {
@@ -3682,9 +3741,6 @@ function inferProjectType(repo) {
   }
   if (/(plugin|extension|integration)/i.test(corpus)) {
     return "插件型工具";
-  }
-  if (/(cms|app|platform|dashboard)/i.test(corpus)) {
-    return "应用型项目";
   }
   return "开发工具";
 }
@@ -3716,7 +3772,7 @@ function inferProjectCapability(repo) {
   if (/open-source coding-agent cli|coding-agent|codex|claude code|copilot cli|cli/.test(corpus)) {
     return "编码智能体或命令行协作能力";
   }
-  if (/book|guide|tutorial|docs/.test(corpus)) {
+  if (/book|guide|tutorial|docs/.test(strongDesignCorpus)) {
     return "系统化文档、教程或知识整理";
   }
   if (/mcp/.test(corpus)) {
@@ -3824,7 +3880,7 @@ function buildDeliverabilityPlan(repositories, aiByRepo) {
 function getDeliverableProjectCopy(repo, ai, fallbackAi, deliverability) {
   const aiPositioning = sanitizeParagraph(ai.positioning_cn || ai.tagline_cn || "");
   const rawPositioning = isChineseProjectCopy(aiPositioning)
-    ? aiPositioning
+    ? normalizeProjectPositioningCopy(aiPositioning)
     : sanitizeParagraph(fallbackAi.positioning_cn);
   const rawRisk = extractRiskText(ai) || fallbackAi.risk_cn;
   const onRewrite = (field) => (rewrite) => {
@@ -3839,6 +3895,25 @@ function getDeliverableProjectCopy(repo, ai, fallbackAi, deliverability) {
       onRewrite: onRewrite("risk_cn"),
     }).text,
   };
+}
+
+function normalizeProjectPositioningCopy(text) {
+  let output = sanitizeParagraph(text)
+    .replace(/(?:^|[。；\s])定位[:：]\s*/g, "")
+    .replace(/[。；\s]价值[:：]\s*/g, "。")
+    .replace(/[。；\s]看点[:：]\s*/g, "。")
+    .replace(/[。；\s]注意[:：]\s*/g, "。")
+    .replace(/[。；\s]今日信号[:：]\s*[^。！？；]*(?:[。！？；]|$)/g, "。")
+    .replace(/。{2,}/g, "。")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  output = output.replace(/^(这是一个|该项目是一个)/, "");
+  const sentences = output.match(/[^。！？；]+[。！？；]?/g) || [];
+  if (sentences.length > 2) {
+    output = sentences.slice(0, 2).join("").trim();
+  }
+  return truncateText(output, PROJECT_POSITIONING_CHAR_LIMIT);
 }
 
 function appendDeliverabilityRewrite(deliverability, fullName, field, rewrite) {
@@ -3965,10 +4040,9 @@ function buildEmailPayload(input) {
       lines.push(`${renderLanguageLabel(repo.language)} · ⭐ ${formatCompactNumber(repo.stars)} · 📈 +${repo.star_delta_24h}`);
       lines.push(copy.positioning);
       lines.push("");
-      lines.push(`今日信号：${buildProjectSignalLine(repo)}`);
       if (copy.risk) {
-        lines.push("");
         lines.push(`⚠️ ${copy.risk}`);
+        lines.push("");
       }
       lines.push(`链接: ${repo.html_url}`);
       lines.push("");
@@ -4279,7 +4353,6 @@ function renderProjectCard(repo, ai, index, deliverability = { rewrites: [] }) {
   const fallbackNote = isFallback
     ? `<div style="margin-top:6px;font-size:11px;color:#9ca3af;">（本地兜底摘要）</div>`
     : "";
-  const signalLine = buildProjectSignalLine(repo);
 
   return [
     `<div style="${cardStyle()}">`,
@@ -4287,7 +4360,6 @@ function renderProjectCard(repo, ai, index, deliverability = { rewrites: [] }) {
     `<div style="${metaRowStyle()}">${escapeHtml(renderLanguageLabel(repo.language))} <span style="margin-left:10px;">⭐ ${escapeHtml(formatCompactNumber(repo.stars))}</span> <span style="margin-left:10px;">📈 +${escapeHtml(String(repo.star_delta_24h))}</span></div>`,
     `<div style="${paragraphStyle()}">${escapeHtml(copy.positioning)}</div>`,
     fallbackNote,
-    `<div style="${metaRowStyle()}">今日信号：${escapeHtml(signalLine)}</div>`,
     riskHtml,
     `<div style="margin-top:14px;"><a href="${escapeAttribute(repo.html_url)}" style="${buttonStyle("#111827", "#ffffff")}">打开 GitHub</a></div>`,
     "</div>",

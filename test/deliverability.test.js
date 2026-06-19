@@ -79,7 +79,7 @@ test("rejects English model project summaries and falls back to Chinese copy", (
   assert.equal(normalized.risk_cn, "");
 });
 
-test("fallback summaries use factual observation copy instead of vague public-info wording", () => {
+test("fallback summaries use natural project copy instead of labeled template wording", () => {
   const fallback = buildFallbackProjectSummary({
     full_name: "shadcn/improve",
     name: "improve",
@@ -93,14 +93,13 @@ test("fallback summaries use factual observation copy instead of vague public-in
     authenticity_score: 20,
   });
 
-  assert.match(fallback.positioning_cn, /定位：/);
-  assert.match(fallback.positioning_cn, /价值：/);
-  assert.match(fallback.positioning_cn, /看点：/);
-  assert.match(fallback.positioning_cn, /注意：/);
-  assert.match(fallback.positioning_cn, /24h 新增 129 星/);
+  assert.match(fallback.positioning_cn, /[\u3400-\u9fff]/);
+  assert.doesNotMatch(fallback.positioning_cn, /定位：|价值：|看点：|注意：|今日信号：/);
+  assert.ok(fallback.positioning_cn.length <= 170);
   assert.match(fallback.positioning_cn, /核对 README、示例和维护者背景/);
   assert.doesNotMatch(fallback.positioning_cn, /公开资料还不足以判断它是否具备长期可用性/);
   assert.doesNotMatch(fallback.positioning_cn, /当前公开信息显示它重点提供/);
+  assert.doesNotMatch(fallback.positioning_cn, /信息不足以判断完整功能/);
 });
 
 test("fallback stack inference trusts GitHub language before README keywords", () => {
@@ -118,9 +117,34 @@ test("fallback stack inference trusts GitHub language before README keywords", (
   });
 
   assert.match(fallback.positioning_cn, /Swift/);
-  assert.match(fallback.positioning_cn, /GitHub 标记语言为 Swift/);
-  assert.match(fallback.positioning_cn, /看点：/);
+  assert.doesNotMatch(fallback.positioning_cn, /GitHub 标记语言为 Swift|看点：/);
   assert.doesNotMatch(fallback.positioning_cn, /主要基于Go构建/);
+});
+
+test("normalizes labeled model summaries into plain reader-facing prose", () => {
+  const repo = {
+    full_name: "example/video-agent",
+    name: "video-agent",
+    description: "AI video editor with MCP agent integration.",
+    language: "TypeScript",
+    topics: ["agent", "video"],
+    readme_excerpt: "Timeline editor with MCP integration.",
+    star_delta_24h: 42,
+    age_days: 10,
+    hours_since_push: 2,
+    authenticity_score: 20,
+  };
+
+  const normalized = normalizeProjectSummaryItem(repo, {
+    full_name: repo.full_name,
+    positioning_cn: "定位：AI 视频编辑器，接入 MCP Agent。价值：适合把生成式视频模型放进剪辑工作流。看点：创建 10 天且仍在更新。注意：先确认安装方式。",
+    risk_cn: "",
+  });
+
+  assert.equal(normalized.__fallback, false);
+  assert.doesNotMatch(normalized.positioning_cn, /定位：|价值：|看点：|注意：/);
+  assert.match(normalized.positioning_cn, /AI 视频编辑器/);
+  assert.doesNotMatch(normalized.positioning_cn, /创建 10 天|先确认安装方式/);
 });
 
 test("enriches a bounded project set to preserve Worker subrequest budget", async () => {

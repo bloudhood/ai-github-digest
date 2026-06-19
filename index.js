@@ -26,7 +26,7 @@ const DEFAULT_TIMEZONE = "Asia/Hong_Kong";
 const DEFAULT_MAX_PROJECTS = 10;
 const DEFAULT_GITHUB_PAGES = 1;
 const README_CHAR_LIMIT = 2500;
-const DEFAULT_PROJECT_SUMMARY_BATCH_SIZE = DEFAULT_MAX_PROJECTS;
+const DEFAULT_PROJECT_SUMMARY_BATCH_SIZE = 5;
 // Keep GitHub Search bursts modest to stay clear of secondary rate limits.
 const SEARCH_PLAN_CONCURRENCY = 3;
 const NEWS_TAG_TAXONOMY = ["模型发布", "产品更新", "开源发布", "研究突破", "安全漏洞", "行业动态", "工具发布"];
@@ -3112,7 +3112,12 @@ async function summarizeProjectDigests(env, payload) {
       });
     } catch (error) {
       batchError = formatError(error);
-      batchResults = batch.map((repo) => buildFallbackProjectSummary(repo, `project-batch-error: ${batchError}`));
+      batchResults = await summarizeProjectBatchAfterFailure(env, {
+        reportDate: payload.reportDate,
+        timezone: payload.timezone,
+        trigger: payload.trigger,
+        news: buildProjectSummaryNewsHint(payload.news),
+      }, batch, batchError);
     }
 
     const retryRepos = batchError
@@ -3167,6 +3172,29 @@ async function summarizeProjectDigests(env, payload) {
     missing_projects: Array.from(new Set(missingProjects)),
     fallback_reasons: Array.from(new Set(fallbackReasons)).slice(0, 12),
   };
+}
+
+async function summarizeProjectBatchAfterFailure(env, basePayload, repositories, firstError) {
+  const retryBatchSize = Math.max(1, Math.floor(repositories.length / 2));
+  const results = [];
+
+  for (const retryBatch of chunkArray(repositories, retryBatchSize)) {
+    try {
+      const retried = await summarizeProjectBatch(env, {
+        ...basePayload,
+        repositories: retryBatch,
+      });
+      results.push(...retried);
+    } catch (error) {
+      const retryError = formatError(error);
+      results.push(...retryBatch.map((repo) => buildFallbackProjectSummary(
+        repo,
+        `project-batch-error: ${firstError}; retry-error: ${retryError}`,
+      )));
+    }
+  }
+
+  return results;
 }
 
 async function summarizeProjectBatch(env, payload) {

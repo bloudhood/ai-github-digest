@@ -75,3 +75,44 @@ test("translates HN and Reddit titles while preserving clickable URLs", async ()
     globalThis.fetch = originalFetch;
   }
 });
+
+test("falls back to localized HN and Reddit titles when translation API fails", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response("rate limited", { status: 429 });
+
+  try {
+    const platforms = await translateExternalSocialPlatforms({
+      DEEPSEEK_API_KEY: "test-key",
+      DEEPSEEK_THINKING: "disabled",
+    }, [
+      {
+        id: "hacker-news",
+        label: "Hacker News",
+        items: [
+          {
+            title: "Zero-Touch OAuth for MCP",
+            url: "https://blog.modelcontextprotocol.io/posts/enterprise-managed-auth/",
+            platform: "hacker-news",
+          },
+        ],
+      },
+      {
+        id: "reddit-ai",
+        label: "Reddit AI",
+        items: [
+          {
+            title: "What's more impressive, GLM 5.1 -> 5.2 or Qwen 3.5 -> 3.6?",
+            url: "https://old.reddit.com/r/LocalLLaMA/comments/example",
+            platform: "reddit-ai",
+          },
+        ],
+      },
+    ]);
+
+    assert.equal(platforms[0].items[0].title, "MCP 的零接触 OAuth");
+    assert.match(platforms[1].items[0].title, /哪个更有看点/);
+    assert.equal(platforms[0].items[0].url, "https://blog.modelcontextprotocol.io/posts/enterprise-managed-auth/");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

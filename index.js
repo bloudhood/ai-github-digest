@@ -3,6 +3,7 @@ import {
   DELIVERY_HISTORY_KEY,
   LAST_ERROR_KEY,
   LAST_RESULT_KEY,
+  LAST_TEST_RESULT_KEY,
   OBSERVED_SNAPSHOT_KEY,
   RUN_MARKER_PREFIX,
   SNAPSHOT_KEY,
@@ -34,7 +35,7 @@ const ROOT_MESSAGE = "GitHub Digest Worker";
 const DEFAULT_REPEAT_COOLDOWN_DAYS = 5;
 const DEFAULT_REPEAT_WINDOW_DAYS = 14;
 const DEFAULT_BREAKOUT_STAR_DELTA = 120;
-const DEFAULT_JUYA_RSS_URL = "https://imjuya.github.io/juya-ai-daily/rss.xml";
+const DEFAULT_JUYA_RSS_URL = "https://daily.juya.uk/rss.xml";
 const DEFAULT_JUYA_CONTENT_LIMIT = 30000;
 const DEFAULT_AIHOT_ITEMS_URL = "https://aihot.virxact.com/api/public/items?mode=selected";
 const DEFAULT_AIHOT_HOME_URL = "https://aihot.virxact.com/feed.xml";
@@ -280,6 +281,17 @@ export default {
       });
     }
 
+    if (request.method === "GET" && url.pathname === "/last-test") {
+      if (!isAuthorized(request, env, url)) {
+        return unauthorized();
+      }
+      const lastTest = await getJson(env.STATE, LAST_TEST_RESULT_KEY, null);
+      return jsonResponse({
+        ok: true,
+        last_test: lastTest,
+      });
+    }
+
     if ((request.method === "GET" || request.method === "POST") && url.pathname === "/run") {
       if (!isAuthorized(request, env, url)) {
         return unauthorized();
@@ -290,6 +302,13 @@ export default {
       const quickRun = isTruthy(url.searchParams.get("quick"));
       const dailySimulationRun = isTruthy(url.searchParams.get("daily_sim"));
       const directRun = isTruthy(url.searchParams.get("direct"));
+      const testTo = normalizeTestRecipient(url.searchParams.get("test_to"), env);
+      if (url.searchParams.has("test_to") && !testTo) {
+        return jsonResponse({
+          ok: false,
+          error: "test_to is not allowed",
+        }, 403);
+      }
       if (directRun && !isTruthy(env.ENABLE_DIRECT_RUN)) {
         return jsonResponse({
           ok: false,
@@ -301,6 +320,7 @@ export default {
         trigger: "manual",
         force,
         dryRun,
+        testTo,
       };
       if (!dryRun && !directRun) {
         assertQueueBinding(env);
@@ -311,6 +331,7 @@ export default {
           dryRun,
           quickRun,
           dailySimulationRun,
+          testTo,
         });
         const sendPromise = env.DIGEST_QUEUE.send(queuedPayload);
         if (ctx && typeof ctx.waitUntil === "function") {
@@ -324,6 +345,7 @@ export default {
           trigger: "manual",
           dryRun,
           force,
+          test_to: testTo || null,
           quick: quickRun,
           daily_sim: dailySimulationRun,
           accepted_at: new Date().toISOString(),
@@ -333,6 +355,7 @@ export default {
       const runtimeEnv = resolveRuntimeEnv(env, {
         quickRun,
         dailySimulationRun,
+        testTo,
       });
       const result = await runDigest(runtimeEnv, {
         ...runOptions,
@@ -375,6 +398,7 @@ export default {
           trigger: payload.trigger || "manual",
           force: Boolean(payload.force),
           dryRun: Boolean(payload.dryRun),
+          testTo: sanitizeLine(payload.testTo || ""),
         });
 
         if (!result || result.ok) {
@@ -400,6 +424,7 @@ async function runDigest(env, options) {
   const runMarkerKey = `${RUN_MARKER_PREFIX}${reportDate}`;
   const dryRun = Boolean(options.dryRun);
   const force = Boolean(options.force);
+  const testRecipient = sanitizeLine(options.testTo || "");
   const phaseTimings = {};
   const timePhase = async (name, fn) => {
     const phaseStart = Date.now();
@@ -493,7 +518,7 @@ async function runDigest(env, options) {
         stateWarnings.push(`email partial failure: ${emailDelivery.failed_recipients.map((item) => `${item.to}: ${item.error}`).join("; ")}`);
       }
 
-      if (!force) {
+      if (!force && !testRecipient) {
         stateWarnings.push(...await persistSuccessfulDeliveryState(env.STATE, {
           runMarkerKey,
           marker: {
@@ -510,24 +535,48 @@ async function runDigest(env, options) {
         }));
       }
 
-      stateWarnings.push(...await safeDeleteJson(env.STATE, LAST_ERROR_KEY));
-      stateWarnings.push(...await safePutJson(env.STATE, LAST_RESULT_KEY, {
-        ok: true,
-        reportDate,
-        timezone,
-        trigger: options.trigger,
-        sent: true,
-        generated_at: new Date().toISOString(),
-        subject: emailPayload.subject,
-        email_acceptance_status: emailDelivery.status,
-        email_delivery: emailDelivery,
-        deliverability: emailPayload.deliverability,
-        phase_timings_ms: phaseTimings,
-        repositories: enrichedProjects.map(toStoredRepository),
-        news: toStoredNews(newsContext),
-        aiDigest,
-        state_warnings: stateWarnings,
-      }));
+      if (testRecipient) {
+        stateWarnings.push(...await safePutJson(env.STATE, LAST_TEST_RESULT_KEY, {
+          ok: true,
+          reportDate,
+          timezone,
+          trigger: options.trigger,
+          test_recipient: testRecipient,
+          sent: true,
+          generated_at: new Date().toISOString(),
+          subject: emailPayload.subject,
+          email_acceptance_status: emailDelivery.status,
+          email_delivery: emailDelivery,
+          deliverability: emailPayload.deliverability,
+          phase_timings_ms: phaseTimings,
+          repositories_count: enrichedProjects.length,
+          news_status: newsContext.status,
+          juya_latest_link: newsContext.latest ? newsContext.latest.link : null,
+          juya_entries_count: newsContext.freshNews && Array.isArray(newsContext.freshNews.entries)
+            ? newsContext.freshNews.entries.length
+            : 0,
+          state_warnings: stateWarnings,
+        }));
+      } else {
+        stateWarnings.push(...await safeDeleteJson(env.STATE, LAST_ERROR_KEY));
+        stateWarnings.push(...await safePutJson(env.STATE, LAST_RESULT_KEY, {
+          ok: true,
+          reportDate,
+          timezone,
+          trigger: options.trigger,
+          sent: true,
+          generated_at: new Date().toISOString(),
+          subject: emailPayload.subject,
+          email_acceptance_status: emailDelivery.status,
+          email_delivery: emailDelivery,
+          deliverability: emailPayload.deliverability,
+          phase_timings_ms: phaseTimings,
+          repositories: enrichedProjects.map(toStoredRepository),
+          news: toStoredNews(newsContext),
+          aiDigest,
+          state_warnings: stateWarnings,
+        }));
+      }
     }
 
     if (stateWarnings.length) {
@@ -598,11 +647,16 @@ function getTimezone(env) {
 }
 
 function resolveRuntimeEnv(env, options) {
-  return options && options.quickRun
-    ? applyManualQuickOverrides(env)
-    : options && options.dailySimulationRun
-      ? applyManualDailySimulationOverrides(env)
-      : env;
+  let runtimeEnv = env;
+  if (options && options.quickRun) {
+    runtimeEnv = applyManualQuickOverrides(runtimeEnv);
+  } else if (options && options.dailySimulationRun) {
+    runtimeEnv = applyManualDailySimulationOverrides(runtimeEnv);
+  }
+  if (options && options.testTo) {
+    runtimeEnv = applyTestRecipientOverride(runtimeEnv, options.testTo);
+  }
+  return runtimeEnv;
 }
 
 function applyManualQuickOverrides(env) {
@@ -639,6 +693,17 @@ function applyManualDailySimulationOverrides(env) {
   return overridden;
 }
 
+function applyTestRecipientOverride(env, testTo) {
+  const overridden = {
+    ...env,
+    EMAIL_TO: testTo,
+  };
+  overridden.STATE = env.STATE;
+  overridden.DIGEST_QUEUE = env.DIGEST_QUEUE;
+  overridden.EMAIL_OUT = env.EMAIL_OUT;
+  return overridden;
+}
+
 function buildDigestJobPayload(input) {
   return {
     version: 1,
@@ -648,6 +713,7 @@ function buildDigestJobPayload(input) {
     dryRun: Boolean(input.dryRun),
     quickRun: Boolean(input.quickRun),
     dailySimulationRun: Boolean(input.dailySimulationRun),
+    testTo: sanitizeLine(input.testTo || ""),
   };
 }
 
@@ -662,6 +728,7 @@ function normalizeDigestJobPayload(payload) {
     dryRun: Boolean(payload.dryRun),
     quickRun: Boolean(payload.quickRun),
     dailySimulationRun: Boolean(payload.dailySimulationRun),
+    testTo: sanitizeLine(payload.testTo || ""),
   };
 }
 
@@ -2149,7 +2216,7 @@ async function fetchJuyaDigest(env, history, now, force) {
   }
 }
 
-function parseRssItems(xml, contentLimit) {
+export function parseRssItems(xml, contentLimit) {
   const items = [];
   const source = String(xml || "");
   const matches = source.matchAll(/<item>([\s\S]*?)<\/item>/g);
@@ -2158,14 +2225,14 @@ function parseRssItems(xml, contentLimit) {
     const title = decodeHtmlEntities(extractXmlField(block, "title"));
     const link = decodeHtmlEntities(extractXmlField(block, "link"));
     const description = decodeHtmlEntities(extractXmlField(block, "description"));
-    const contentHtml = extractXmlField(block, "content:encoded", true);
+    const contentHtml = normalizeRssHtmlContent(extractXmlField(block, "content:encoded", true));
     const pubDate = decodeHtmlEntities(extractXmlField(block, "pubDate"));
 
     if (!title || !link) {
       continue;
     }
 
-    const rawText = sanitizeHtml(contentHtml || description);
+    const rawText = decodeHtmlEntities(sanitizeHtml(contentHtml || description));
     items.push({
       title,
       link,
@@ -2177,6 +2244,11 @@ function parseRssItems(xml, contentLimit) {
     });
   }
   return items;
+}
+
+function normalizeRssHtmlContent(content) {
+  const raw = stripCdata(content).trim();
+  return raw ? decodeHtmlEntities(raw) : "";
 }
 
 function parseOfficialFeedItems(xml, feed) {
@@ -3799,20 +3871,36 @@ function githubHeaders(env) {
 
 function isAuthorized(request, env, url) {
   const expected = String(env.RUN_SECRET || "").trim();
+  const headerSecret = request.headers.get("x-run-secret");
+  const testExpected = String(env.TEST_RUN_SECRET || "").trim();
+  if (testExpected && safeSecretEqual(headerSecret, testExpected)) {
+    return true;
+  }
   if (!expected) {
     return false;
   }
 
-  const headerSecret = request.headers.get("x-run-secret");
   if (safeSecretEqual(headerSecret, expected)) {
     return true;
   }
-
   if (!isTruthy(env.ALLOW_QUERY_RUN_SECRET)) {
     return false;
   }
 
   return safeSecretEqual(url.searchParams.get("secret"), expected);
+}
+
+function normalizeTestRecipient(value, env) {
+  const raw = String(value || "").trim();
+  if (!raw || !isTruthy(env.ALLOW_TEST_RECIPIENT_OVERRIDE)) {
+    return "";
+  }
+  const recipients = raw.split(",").map((item) => item.trim()).filter(Boolean);
+  if (recipients.length !== 1) {
+    return "";
+  }
+  const [recipient] = recipients;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipient) ? recipient : "";
 }
 
 function safeSecretEqual(actual, expected) {
@@ -4104,19 +4192,18 @@ function buildJuyaSectionMap(contentHtml) {
   return map;
 }
 
-function extractJuyaNewsEntries(contentHtml) {
+export function extractJuyaNewsEntries(contentHtml) {
   const entries = [];
   const sectionMap = buildJuyaSectionMap(contentHtml);
-  // Matches both linked entries: <h2><a href="URL">Title</a> <code>#N</code></h2>
-  // And link-less entries:       <h2>Title <code>#N</code></h2>
-  const pattern = /<h2>\s*(?:<a\s+href="([^"]*)"[^>]*>([\s\S]*?)<\/a>|((?:(?!<code>)[\s\S])*?))\s*<code>#(\d+)<\/code>\s*<\/h2>([\s\S]*?)(?=<hr\b[^>]*>|<h2\b|$)/gi;
+  // Old Juya pages used h2 entry headings; daily.juya.uk now uses h3.
+  const pattern = /<h([23])\b[^>]*>\s*(?:<a\s+href=(["'])(.*?)\2[^>]*>([\s\S]*?)<\/a>|((?:(?!<code>)[\s\S])*?))\s*<code>#(\d+)<\/code>\s*<\/h\1>([\s\S]*?)(?=<hr\b[^>]*>|<h[23]\b[^>]*>[\s\S]*?<code>#\d+<\/code>|<h2\b[^>]*>|$)/gi;
   let match;
 
   while ((match = pattern.exec(String(contentHtml || ""))) !== null) {
-    const link = decodeHtmlEntities(match[1] || "");
-    const title = sanitizeLine(decodeHtmlEntities(match[2] || match[3] || ""));
-    const entryNum = Number(match[4]);
-    const body = match[5];
+    const link = decodeHtmlEntities(match[3] || "");
+    const title = sanitizeLine(decodeHtmlEntities(match[4] || match[5] || ""));
+    const entryNum = Number(match[6]);
+    const body = match[7];
     const quoteMatch = body.match(/<blockquote>[\s\S]*?<p>([\s\S]*?)<\/p>[\s\S]*?<\/blockquote>/i);
     const paragraphMatch = body.match(/<p>([\s\S]*?)<\/p>/i);
     const summary = sanitizeParagraph(sanitizeHtml(quoteMatch ? quoteMatch[1] : (paragraphMatch ? paragraphMatch[1] : "")));
@@ -4209,10 +4296,10 @@ function findMatchingRawEntry(entries, title) {
 
 function extractImageUrls(html) {
   const urls = [];
-  const regex = /<img[^>]+src="([^"]+)"/gi;
+  const regex = /<img[^>]+src=(["'])(.*?)\1/gi;
   let match;
   while ((match = regex.exec(String(html || ""))) !== null) {
-    const url = decodeHtmlEntities(match[1]);
+    const url = decodeHtmlEntities(match[2]);
     if (url && !urls.includes(url)) {
       urls.push(url);
     }
@@ -4222,14 +4309,14 @@ function extractImageUrls(html) {
 
 function extractAnchorLinks(html) {
   const links = [];
-  const regex = /<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  const regex = /<a[^>]+href=(["'])(.*?)\1[^>]*>([\s\S]*?)<\/a>/gi;
   let match;
   while ((match = regex.exec(String(html || ""))) !== null) {
-    const href = decodeHtmlEntities(match[1]);
+    const href = decodeHtmlEntities(match[2]);
     if (!href || href.startsWith("#") || !/^https?:\/\//i.test(href)) {
       continue;
     }
-    const rawLabel = sanitizeLine(sanitizeHtml(match[2])) || "";
+    const rawLabel = sanitizeLine(decodeHtmlEntities(sanitizeHtml(match[3]))) || "";
     const label = formatSourceLinkLabel(href, rawLabel, links.length);
     if (!links.some((item) => item.href === href)) {
       links.push({ href, label });

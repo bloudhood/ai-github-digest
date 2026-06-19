@@ -5,7 +5,7 @@
 1. 调 GitHub API 拉取候选项目。
 2. 用“24 小时 star 增量 + 新项目速度 + 最近 push 活跃度 + forks 信号”做排序。
 3. 读取 Top 项目的 README 摘要。
-4. 抓取 `https://imjuya.github.io/juya-ai-daily/` 的最新 RSS 日报。
+4. 抓取 `https://daily.juya.uk/rss.xml` 的最新 RSS 日报。
 5. 调 DeepSeek API 分两段生成日报：先做总览，再按小批次补全项目摘要。
 6. 用 Cloudflare `send_email` 直接把日报发到你的邮箱。
 
@@ -62,12 +62,14 @@
 - `REPEAT_COOLDOWN_DAYS`: 默认 `5`
 - `REPEAT_WINDOW_DAYS`: 默认 `14`
 - `BREAKOUT_STAR_DELTA`: 默认 `120`
-- `JUYA_RSS_URL`: 默认 `https://imjuya.github.io/juya-ai-daily/rss.xml`
+- `JUYA_RSS_URL`: 默认 `https://daily.juya.uk/rss.xml`
 - `JUYA_CONTENT_LIMIT`: 默认 `30000`
+- `ALLOW_TEST_RECIPIENT_OVERRIDE`: 允许授权手动测试时用单个 `test_to` 收件人覆盖 `EMAIL_TO`
 
 Secrets：
 
 - `RUN_SECRET`: 手动触发 `/run` 和读取 `/last` 的密钥
+- `TEST_RUN_SECRET`: 可选临时测试密钥，只通过 `x-run-secret` header 生效，用完后应删除
 - `GITHUB_TOKEN`: 建议配置，避免 GitHub 未登录限流
 - `DEEPSEEK_API_KEY`: DeepSeek API Key
 - `DEEPSEEK_BASE_URL`: 可选，默认 `https://api.deepseek.com`

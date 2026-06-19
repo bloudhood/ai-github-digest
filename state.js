@@ -3,6 +3,7 @@ export const OBSERVED_SNAPSHOT_KEY = "state:last-observed-snapshot";
 export const DELIVERY_HISTORY_KEY = "state:delivery-history";
 export const LAST_RESULT_KEY = "digest:last";
 export const LAST_ERROR_KEY = "digest:last-error";
+export const LAST_TEST_RESULT_KEY = "digest:last-test";
 export const RUN_MARKER_PREFIX = "digest:sent:";
 
 const RUN_MARKER_TTL_SECONDS = 60 * 60 * 24 * 8;

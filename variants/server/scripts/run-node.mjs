@@ -116,7 +116,7 @@ function parseArgs(argv) {
 }
 
 function printHelp() {
-  console.log(`Usage: node variants/net2-server/scripts/run-node.mjs [options]
+  console.log(`Usage: node variants/server/scripts/run-node.mjs [options]
 
 Options:
   --send              Actually send email. Without this flag the runner is a dry run.

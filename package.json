@@ -1,7 +1,7 @@
 {
   "name": "github-digest",
   "version": "1.0.0",
-  "description": "AI / GitHub digest mailer with net-2 and Cloudflare deployment variants",
+  "description": "AI / GitHub digest mailer with server and Cloudflare deployment variants",
   "main": "index.js",
   "type": "module",
   "private": true,
@@ -13,8 +13,8 @@
     "deploy": "npm run cloudflare:deploy",
     "deploy:dry-run": "npm run cloudflare:deploy:dry-run",
     "dev": "npm run cloudflare:dev",
-    "node:dry-run": "node variants/net2-server/scripts/run-node.mjs --dry-run",
-    "node:send": "node variants/net2-server/scripts/run-node.mjs --send",
+    "node:dry-run": "node variants/server/scripts/run-node.mjs --dry-run",
+    "node:send": "node variants/server/scripts/run-node.mjs --send",
     "tail": "npx -y wrangler tail",
     "test": "node --loader ./test/cloudflare-email-loader.mjs --test test/*.js"
   },

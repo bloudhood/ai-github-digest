@@ -1,0 +1,12 @@
+[Unit]
+Description=GitHub AI digest mailer
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/github-digest/app
+EnvironmentFile=/home/ubuntu/github-digest/.env
+ExecStart=/usr/bin/node /home/ubuntu/github-digest/app/variants/net2-server/scripts/run-node.mjs --send --scheduled
+Nice=5

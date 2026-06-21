@@ -5,5 +5,14 @@ node_modules/
 .dev.vars
 .env
 .env.*
+!.env.example
 dist/
 coverage/
+data/
+logs/
+migration-state/
+variants/**/data/
+variants/**/logs/
+variants/**/wrangler.local.toml
+variants/**/*.local.toml
+variants/**/secrets*.json

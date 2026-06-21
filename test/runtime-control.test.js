@@ -39,7 +39,7 @@ test("queues manual digest jobs with normalized payloads", async () => {
       },
     },
   };
-  const request = new Request("https://digest.khaiise.com/run?force=1&quick=1", {
+  const request = new Request("https://digest.example.com/run?force=1&quick=1", {
     headers: { "x-run-secret": "secret-value" },
   });
 
@@ -73,7 +73,7 @@ test("queues manual digest jobs with an explicitly allowed test recipient", asyn
       },
     },
   };
-  const request = new Request("https://digest.khaiise.com/run?force=1&test_to=abc1275132155%40gmail.com", {
+  const request = new Request("https://digest.example.com/run?force=1&test_to=test-recipient%40example.com", {
     headers: { "x-run-secret": "secret-value" },
   });
 
@@ -81,13 +81,13 @@ test("queues manual digest jobs with an explicitly allowed test recipient", asyn
   const body = await response.json();
 
   assert.equal(response.status, 202);
-  assert.equal(body.test_to, "abc1275132155@gmail.com");
+  assert.equal(body.test_to, "test-recipient@example.com");
   assert.equal(sent.length, 1);
-  assert.equal(sent[0].testTo, "abc1275132155@gmail.com");
+  assert.equal(sent[0].testTo, "test-recipient@example.com");
 });
 
 test("rejects test recipient overrides unless explicitly enabled", async () => {
-  const request = new Request("https://digest.khaiise.com/run?test_to=abc1275132155%40gmail.com", {
+  const request = new Request("https://digest.example.com/run?test_to=test-recipient%40example.com", {
     headers: { "x-run-secret": "secret-value" },
   });
 
@@ -110,14 +110,14 @@ test("authorizes with temporary test secret only via header", async () => {
       },
     },
   };
-  const headerRequest = new Request("https://digest.khaiise.com/run?test_to=abc1275132155%40gmail.com", {
+  const headerRequest = new Request("https://digest.example.com/run?test_to=test-recipient%40example.com", {
     headers: { "x-run-secret": "temporary-secret" },
   });
-  const queryRequest = new Request("https://digest.khaiise.com/run?secret=temporary-secret&test_to=abc1275132155%40gmail.com");
+  const queryRequest = new Request("https://digest.example.com/run?secret=temporary-secret&test_to=test-recipient%40example.com");
 
   const headerResponse = await worker.fetch(headerRequest, env);
   assert.equal(headerResponse.status, 202);
-  assert.equal(sent[0].testTo, "abc1275132155@gmail.com");
+  assert.equal(sent[0].testTo, "test-recipient@example.com");
 
   const queryResponse = await worker.fetch(queryRequest, env);
   assert.equal(queryResponse.status, 401);
@@ -128,12 +128,12 @@ test("returns the last test delivery result separately", async () => {
     records: {
       "digest:last-test": {
         ok: true,
-        test_recipient: "abc1275132155@gmail.com",
+        test_recipient: "test-recipient@example.com",
         email_acceptance_status: "accepted",
       },
     },
   });
-  const request = new Request("https://digest.khaiise.com/last-test", {
+  const request = new Request("https://digest.example.com/last-test", {
     headers: { "x-run-secret": "secret-value" },
   });
 
@@ -144,17 +144,17 @@ test("returns the last test delivery result separately", async () => {
   const body = await response.json();
 
   assert.equal(response.status, 200);
-  assert.equal(body.last_test.test_recipient, "abc1275132155@gmail.com");
+  assert.equal(body.last_test.test_recipient, "test-recipient@example.com");
   assert.equal(body.last_test.email_acceptance_status, "accepted");
 });
 
 test("authorizes run endpoints with header first and gates query secrets", async () => {
   const env = { RUN_SECRET: "secret-value" };
   const state = new FakeKV({ records: { "digest:last": { ok: true } } });
-  const headerRequest = new Request("https://digest.khaiise.com/last", {
+  const headerRequest = new Request("https://digest.example.com/last", {
     headers: { "x-run-secret": "secret-value" },
   });
-  const queryRequest = new Request("https://digest.khaiise.com/last?secret=secret-value");
+  const queryRequest = new Request("https://digest.example.com/last?secret=secret-value");
 
   const headerResponse = await worker.fetch(headerRequest, { ...env, STATE: state });
   assert.equal(headerResponse.status, 200);
@@ -172,7 +172,7 @@ test("authorizes run endpoints with header first and gates query secrets", async
 });
 
 test("rejects direct runs unless the direct-run flag is enabled", async () => {
-  const request = new Request("https://digest.khaiise.com/run?direct=1", {
+  const request = new Request("https://digest.example.com/run?direct=1", {
     headers: { "x-run-secret": "secret-value" },
   });
   const response = await worker.fetch(request, { RUN_SECRET: "secret-value" });

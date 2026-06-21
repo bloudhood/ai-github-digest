@@ -1,5 +1,5 @@
 name = "github-digest"
-main = "index.js"
+main = "../../index.js"
 compatibility_date = "2026-05-23"
 
 [observability]
@@ -10,16 +10,12 @@ head_sampling_rate = 1
 required = ["GITHUB_TOKEN", "DEEPSEEK_API_KEY", "RUN_SECRET"]
 
 [[routes]]
-pattern = "digest.khaiise.com"
+pattern = "digest.example.com"
 custom_domain = true
 
-[triggers]
-# Cloudflare Cron 使用 UTC。04:00 UTC = 12:00 Asia/Hong_Kong
-crons = ["0 4 * * *"]
-
 [vars]
-EMAIL_FROM = "digest@khaiise.com"
-EMAIL_TO = "abc1275132155@163.com,317770557@qq.com"
+EMAIL_FROM = "digest@example.com"
+EMAIL_TO = "recipient-primary@example.com,recipient-secondary@example.com"
 REPORT_TIMEZONE = "Asia/Hong_Kong"
 MAX_PROJECTS = "10"
 GITHUB_SEARCH_PAGES = "1"
@@ -39,19 +35,13 @@ ALLOW_TEST_RECIPIENT_OVERRIDE = "true"
 
 [[kv_namespaces]]
 binding = "STATE"
-id = "edfa110c038b4e76b4653befd3fb0a09"
+id = "<KV_NAMESPACE_ID>"
 
 [[queues.producers]]
 binding = "DIGEST_QUEUE"
 queue = "github-digest-jobs"
 
-[[queues.consumers]]
-queue = "github-digest-jobs"
-max_batch_size = 1
-max_batch_timeout = 2
-max_retries = 3
-
 [[send_email]]
 name = "EMAIL_OUT"
-allowed_destination_addresses = ["abc1275132155@163.com", "317770557@qq.com", "abc1275132155@gmail.com"]
-allowed_sender_addresses = ["digest@khaiise.com"]
+allowed_destination_addresses = ["recipient-primary@example.com", "recipient-secondary@example.com"]
+allowed_sender_addresses = ["digest@example.com"]

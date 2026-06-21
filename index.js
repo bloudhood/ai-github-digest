@@ -1,4 +1,3 @@
-import { EmailMessage } from "cloudflare:email";
 import {
   DELIVERY_HISTORY_KEY,
   LAST_ERROR_KEY,
@@ -27,8 +26,7 @@ const DEFAULT_MAX_PROJECTS = 10;
 const DEFAULT_GITHUB_PAGES = 1;
 const README_CHAR_LIMIT = 2500;
 const DEFAULT_PROJECT_SUMMARY_BATCH_SIZE = 5;
-// Keep GitHub Search bursts modest to stay clear of secondary rate limits.
-const SEARCH_PLAN_CONCURRENCY = 3;
+// Keep GitHub Search bursts modest by default; net-2 can raise this via env.
 const NEWS_TAG_TAXONOMY = ["模型发布", "产品更新", "开源发布", "研究突破", "安全漏洞", "行业动态", "工具发布"];
 const DIGEST_QUEUE_NAME = "github-digest-jobs";
 const ROOT_MESSAGE = "GitHub Digest Worker";
@@ -90,6 +88,8 @@ const PROJECT_POSITIONING_CHAR_LIMIT = 170;
 const DEFAULT_RELEASE_CANDIDATE_LIMIT = 0;
 const DEFAULT_README_ENRICH_LIMIT = 8;
 const DEFAULT_TRENDING_CANDIDATE_LIMIT = 8;
+const DEFAULT_SEARCH_PLAN_CONCURRENCY = 3;
+const DEFAULT_LOW_DELTA_QUALITY_FLOOR = 30;
 const QUALIFICATION_BUCKET_PRIORITY = {
   core: 0,
   reference: 1,
@@ -427,7 +427,7 @@ export default {
   },
 };
 
-async function runDigest(env, options) {
+export async function runDigest(env, options) {
   const startedAt = new Date();
   const now = options.now || new Date();
   const timezone = getTimezone(env);
@@ -657,7 +657,7 @@ function getTimezone(env) {
   return String(env.REPORT_TIMEZONE || DEFAULT_TIMEZONE);
 }
 
-function resolveRuntimeEnv(env, options) {
+export function resolveRuntimeEnv(env, options) {
   let runtimeEnv = env;
   if (options && options.quickRun) {
     runtimeEnv = applyManualQuickOverrides(runtimeEnv);
@@ -749,6 +749,18 @@ function getMaxProjects(env) {
 
 function getGithubPages(env) {
   return clampInteger(env.GITHUB_SEARCH_PAGES, DEFAULT_GITHUB_PAGES, 1, 3);
+}
+
+function getSearchPlanConcurrency(env) {
+  return clampInteger(env.SEARCH_PLAN_CONCURRENCY, DEFAULT_SEARCH_PLAN_CONCURRENCY, 1, 8);
+}
+
+function getTrendingCandidateLimit(env) {
+  return clampInteger(env.TRENDING_CANDIDATE_LIMIT, DEFAULT_TRENDING_CANDIDATE_LIMIT, 1, 40);
+}
+
+function getLowDeltaQualityFloor(env) {
+  return clampInteger(env.LOW_DELTA_QUALITY_FLOOR, DEFAULT_LOW_DELTA_QUALITY_FLOOR, 1, 80);
 }
 
 function getRepeatCooldownDays(env) {
@@ -864,7 +876,7 @@ async function collectCandidates(env, plans) {
 async function collectSearchCandidates(env, plans) {
   const seen = new Map();
   const perPage = 50;
-  const limit = createConcurrencyLimiter(SEARCH_PLAN_CONCURRENCY);
+  const limit = createConcurrencyLimiter(getSearchPlanConcurrency(env));
   const tasks = [];
 
   for (const plan of plans) {
@@ -920,7 +932,7 @@ async function collectTrendingCandidates(env) {
   }
 
   const seeds = mergeDiscoverySeeds(githubTrendingSeeds, trendshiftSeeds);
-  const limitedSeeds = seeds.slice(0, DEFAULT_TRENDING_CANDIDATE_LIMIT);
+  const limitedSeeds = seeds.slice(0, getTrendingCandidateLimit(env));
   const repositories = await Promise.all(limitedSeeds.map(async (seed) => {
     try {
       const item = await githubGetRepository(env, seed.full_name);
@@ -1511,7 +1523,7 @@ function filterDeliverableProjects(repositories, env) {
   const minDelta = getMinDeliverableStarDelta(env);
   const authenticityThreshold = getAuthenticityThreshold(env);
   const minAIDomainScore = 2;
-  const lowDeltaQualityFloor = 30;
+  const lowDeltaQualityFloor = getLowDeltaQualityFloor(env);
 
   return repositories.filter((repo) => {
     const isRelevant = Number(repo.ai_domain_score || 0) >= minAIDomainScore
@@ -4072,34 +4084,64 @@ function buildEmailPayload(input) {
 
 async function sendEmail(env, subject, textBody, htmlBody) {
   const recipients = String(env.EMAIL_TO).split(",").map((s) => s.trim()).filter(Boolean);
+  const startedAt = new Date();
   const accepted = [];
   const failed = [];
+  const attempts = [];
   for (const to of recipients) {
+    const attemptedAt = new Date();
     try {
-      const raw = buildRawEmail({ from: env.EMAIL_FROM, to, subject, textBody, htmlBody });
-      const message = new EmailMessage(env.EMAIL_FROM, to, raw);
+      const message = {
+        to,
+        from: env.EMAIL_FROM,
+        subject,
+        text: textBody,
+        html: htmlBody,
+      };
       await env.EMAIL_OUT.send(message);
       accepted.push(to);
-      console.log(`Email Service accepted message for ${to}`);
+      const acceptedAt = new Date();
+      attempts.push({
+        to,
+        status: "accepted",
+        attempted_at: attemptedAt.toISOString(),
+        accepted_at: acceptedAt.toISOString(),
+        duration_ms: acceptedAt.getTime() - attemptedAt.getTime(),
+      });
+      console.log(`Email Service accepted message for ${to} at ${acceptedAt.toISOString()}`);
     } catch (err) {
       const error = formatError(err);
-      console.error(`Email Service rejected message for ${to}: ${error}`);
+      const failedAt = new Date();
+      console.error(`Email Service rejected message for ${to} at ${failedAt.toISOString()}: ${error}`);
+      attempts.push({
+        to,
+        status: "failed",
+        attempted_at: attemptedAt.toISOString(),
+        failed_at: failedAt.toISOString(),
+        duration_ms: failedAt.getTime() - attemptedAt.getTime(),
+        error,
+      });
       failed.push({ to, error });
     }
   }
   if (failed.length === recipients.length) {
     throw new Error(`All email recipients failed: ${failed.map((item) => `${item.to}: ${item.error}`).join(", ")}`);
   }
+  const finishedAt = new Date();
   const result = {
     status: failed.length ? "partial_acceptance" : "accepted",
     accepted_count: accepted.length,
     failed_count: failed.length,
     accepted_recipients: accepted,
     failed_recipients: failed,
-    checked_at: new Date().toISOString(),
+    attempts,
+    started_at: startedAt.toISOString(),
+    finished_at: finishedAt.toISOString(),
+    duration_ms: finishedAt.getTime() - startedAt.getTime(),
+    checked_at: finishedAt.toISOString(),
     note: "accepted means Email Service accepted the message; final delivery must be checked in Cloudflare Email Service analytics",
   };
-  console.log(`Email Service acceptance summary: status=${result.status}, accepted=${accepted.length}, failed=${failed.length}`);
+  console.log(`Email Service acceptance summary at ${result.checked_at}: status=${result.status}, accepted=${accepted.length}, failed=${failed.length}`);
   return result;
 }
 

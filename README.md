@@ -1,15 +1,20 @@
 # GitHub Daily Digest Worker
 
-这个 Worker 会每天自动执行下面这条链路：
+这个日报现在有两种运行方式：
+
+1. Cloudflare 版本保留为备用，但已安全暂停自动发送。
+2. net-2 上的 Node 版本负责日常运行、发信和更细的日志。
+
+两边执行的链路一致：
 
 1. 调 GitHub API 拉取候选项目。
 2. 用“24 小时 star 增量 + 新项目速度 + 最近 push 活跃度 + forks 信号”做排序。
 3. 读取 Top 项目的 README 摘要。
 4. 抓取 `https://daily.juya.uk/rss.xml` 的最新 RSS 日报。
 5. 调 DeepSeek API 分两段生成日报：先做总览，再按小批次补全项目摘要。
-6. 用 Cloudflare `send_email` 直接把日报发到你的邮箱。
+6. 按版本通过 Cloudflare Worker binding 或 Cloudflare Email REST API 发出日报。
 
-这意味着它可以完全跑在 Cloudflare 上，不需要你的电脑保持开机。
+Cloudflare 版本已经降级为备用，不再承担每日自动发送。
 
 ## 为什么这样做
 
@@ -32,13 +37,15 @@
 
 ## 目录
 
-- `index.js`: Worker 主逻辑
-- `wrangler.toml`: Cloudflare 配置示例
+- `index.js`: 共享日报核心逻辑，Cloudflare Worker 与 net-2 runner 共用
+- `state.js`: 共享状态读写辅助
+- `variants/net2-server/`: net-2 Node/server 版本，包含 runner、systemd 模板、环境变量样例和本版本 ignore
+- `variants/cloudflare-worker/`: Cloudflare Worker 版本，包含暂停版和旧自动版 wrangler 示例配置
+- `test/`: 共享逻辑测试
 
-## 需要的 Cloudflare 能力
+## Cloudflare 备用能力
 
 - Workers
-- Cron Triggers
 - KV
 - Email Routing
 - Send Email binding
@@ -46,10 +53,10 @@
 
 ## 需要的变量和 Secret
 
-普通变量（当前 `wrangler.toml`）：
+普通变量：
 
-- `EMAIL_FROM`: `digest@example.com`
-- `EMAIL_TO`: `recipient-primary@example.com,recipient-secondary@example.com`
+- `EMAIL_FROM`: 发件地址，例如 `digest@example.com`
+- `EMAIL_TO`: 逗号分隔的收件地址，例如 `recipient-primary@example.com,recipient-secondary@example.com`
 - `REPORT_TIMEZONE`: 默认 `Asia/Hong_Kong`
 - `MAX_PROJECTS`: `10`
 - `GITHUB_SEARCH_PAGES`: `1`
@@ -77,11 +84,32 @@ Secrets：
 - `DEEPSEEK_API_KEY`: DeepSeek API Key
 - `DEEPSEEK_BASE_URL`: 可选，默认 `https://api.deepseek.com`
 
-## 部署步骤
+## net-2 部署步骤
 
-1. 确认 `wrangler.toml` 指向生产 Worker `github-digest`、域名 `digest.example.com`、KV、Queue 和 Email binding。
+1. 把仓库同步到 net-2，比如放到 `/home/ubuntu/github-digest/app`。
+2. 把 `variants/net2-server/.env.example` 复制成 `/home/ubuntu/github-digest/.env`，填入 `DEEPSEEK_API_KEY`、`GITHUB_TOKEN`、`CLOUDFLARE_EMAIL_API_TOKEN`。
+3. 把 Cloudflare KV 导出文件放到 `/home/ubuntu/github-digest/data/state.json`。
+4. 安装 systemd unit：
+
+```bash
+sudo cp /home/ubuntu/github-digest/app/variants/net2-server/systemd/github-digest.service /etc/systemd/system/
+sudo cp /home/ubuntu/github-digest/app/variants/net2-server/systemd/github-digest.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now github-digest.timer
+```
+
+5. 手动试跑：
+
+```bash
+node /home/ubuntu/github-digest/app/variants/net2-server/scripts/run-node.mjs --dry-run
+node /home/ubuntu/github-digest/app/variants/net2-server/scripts/run-node.mjs --send --force
+```
+
+## Cloudflare 备用部署步骤
+
+1. 复制 `variants/cloudflare-worker/wrangler.paused.example.toml` 为被 `.gitignore` 忽略的 `variants/cloudflare-worker/wrangler.local.toml`，再填入真实域名、KV ID、发件地址和收件地址。
 2. 在 Cloudflare 打开 Email Routing，并验证接收邮箱。
-3. 确保发件地址属于你的域名，例如 `digest@example.com`。
+3. 确保发件地址属于你的已验证域名。
 4. 配置 `send_email` binding。
 5. 写入 Secret：
 
@@ -123,14 +151,9 @@ Invoke-RestMethod "https://digest.example.com/run?force=1" -Headers $headers
 
 ## 定时说明
 
-`wrangler.toml` 当前写的是：
+Cloudflare 这边已经暂停 Cron 和 Queue consumer，不再自动发送。旧自动版配置保存在 `variants/cloudflare-worker/wrangler.legacy-auto.example.toml`，只作为归档/回滚参考。
 
-```toml
-[triggers]
-crons = ["0 4 * * *"]
-```
-
-Cloudflare Cron 使用 UTC，所以这表示每天 `04:00 UTC` 运行，也就是香港时间每天 `12:00`。
+net-2 的 systemd timer 默认每天 `03:58 UTC` 运行，对应香港时间 `11:58`。
 
 ## 当前评分逻辑
 
@@ -152,6 +175,7 @@ Cloudflare Cron 使用 UTC，所以这表示每天 `04:00 UTC` 运行，也就�
 
 - 第一次运行没有历史快照，所以 `star_delta_24h` 会是 0，主要靠兜底评分。
 - GitHub Search 不是“全站实时热榜”，更像候选集入口。
-- README 很长时会截前面一部分发给 DeepSeek；橘鸦新闻和 AIHOT 补充新闻有独立渲染预算，避免第二来源内容淹没主新闻；GitHub 项目默认上限为 20。
+- net-2 会把候选抓取页数、Trending 种子、低增量质量门槛调高，但最终邮件条数仍由 `MAX_PROJECTS` 控制。
+- README 很长时会截前面一部分发给 DeepSeek；橘鸦新闻和 AIHOT 补充新闻有独立渲染预算，避免第二来源内容淹没主新闻；GitHub 项目默认上限为 10。
 - HN / Reddit 等社区热榜属于增强信息源，外部网络失败时会跳过，不影响主邮件生成。
-- Email 发送依赖 Cloudflare Email Routing 的已验证地址和绑定配置。
+- Cloudflare REST 发信需要 `CLOUDFLARE_ACCOUNT_ID` 和 `CLOUDFLARE_EMAIL_API_TOKEN`，日志会单独记录每次发信尝试、接受时间和耗时。

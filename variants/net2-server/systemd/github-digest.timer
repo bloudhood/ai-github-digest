@@ -1,0 +1,11 @@
+[Unit]
+Description=Run GitHub AI digest mailer daily
+
+[Timer]
+# net-2 uses UTC. 03:58 UTC = 11:58 Asia/Hong_Kong.
+OnCalendar=*-*-* 03:58:00
+Persistent=true
+Unit=github-digest.service
+
+[Install]
+WantedBy=timers.target

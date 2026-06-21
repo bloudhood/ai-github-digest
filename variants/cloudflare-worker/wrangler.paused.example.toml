@@ -1,5 +1,5 @@
 name = "github-digest"
-main = "index.js"
+main = "../../index.js"
 compatibility_date = "2026-05-23"
 
 [observability]
@@ -12,10 +12,6 @@ required = ["GITHUB_TOKEN", "DEEPSEEK_API_KEY", "RUN_SECRET"]
 [[routes]]
 pattern = "digest.example.com"
 custom_domain = true
-
-[triggers]
-# Cloudflare Cron 使用 UTC。04:00 UTC = 12:00 Asia/Hong_Kong
-crons = ["0 4 * * *"]
 
 [vars]
 EMAIL_FROM = "digest@example.com"
@@ -45,13 +41,7 @@ id = "<KV_NAMESPACE_ID>"
 binding = "DIGEST_QUEUE"
 queue = "github-digest-jobs"
 
-[[queues.consumers]]
-queue = "github-digest-jobs"
-max_batch_size = 1
-max_batch_timeout = 2
-max_retries = 3
-
 [[send_email]]
 name = "EMAIL_OUT"
-allowed_destination_addresses = ["recipient-primary@example.com", "recipient-secondary@example.com", "test-recipient@example.com"]
+allowed_destination_addresses = ["recipient-primary@example.com", "recipient-secondary@example.com"]
 allowed_sender_addresses = ["digest@example.com"]

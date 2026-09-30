@@ -1,0 +1,29 @@
+{
+  "name": "github-digest",
+  "version": "1.0.0",
+  "description": "基于 Cloudflare Workers 的 AI / GitHub 热门项目邮件系统",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "check": "node --check index.js",
+    "deploy": "npx -y wrangler deploy",
+    "deploy:dry-run": "npx -y wrangler deploy --dry-run",
+    "dev": "npx -y wrangler dev",
+    "node:dry-run": "node scripts/run-node.mjs --dry-run",
+    "node:send": "node scripts/run-node.mjs --send",
+    "tail": "npx -y wrangler tail",
+    "test": "node --loader ./test/cloudflare-email-loader.mjs --test test/*.js"
+  },
+  "keywords": [
+    "cloudflare-workers",
+    "github-trending",
+    "ai",
+    "email-digest",
+    "llm"
+  ],
+  "author": "bloudhood",
+  "license": "MIT",
+  "devDependencies": {
+    "wrangler": "^4.94.0"
+  }
+}

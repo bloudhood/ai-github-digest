@@ -1,0 +1,52 @@
+name = "github-digest"
+main = "index.js"
+compatibility_date = "2026-05-23"
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[secrets]
+required = ["GITHUB_TOKEN", "DEEPSEEK_API_KEY", "RUN_SECRET"]
+
+[[routes]]
+pattern = "digest.example.com"
+custom_domain = true
+
+[vars]
+EMAIL_FROM = "digest@example.com"
+EMAIL_TO = "recipient-primary@example.com,recipient-secondary@example.com"
+REPORT_TIMEZONE = "Asia/Hong_Kong"
+MAX_PROJECTS = "10"
+GITHUB_SEARCH_PAGES = "1"
+DEEPSEEK_MODEL = "deepseek-v4-flash"
+DIGEST_OVERVIEW_MODEL = "deepseek-v4-flash"
+PROJECT_SUMMARY_MODEL = "deepseek-v4-flash"
+DEEPSEEK_THINKING = "enabled"
+DIGEST_OVERVIEW_THINKING = "enabled"
+PROJECT_SUMMARY_THINKING = "enabled"
+DIGEST_OVERVIEW_REASONING_EFFORT = "high"
+PROJECT_SUMMARY_REASONING_EFFORT = "high"
+PROJECT_REPEAT_COOLDOWN_DAYS = "30"
+PROJECT_REPEAT_WINDOW_DAYS = "30"
+MIN_BREAKOUT_REPEAT_GAP_DAYS = "14"
+MIN_RELEASE_REPEAT_GAP_DAYS = "7"
+MAX_REPEAT_PERCENT = "30"
+BREAKOUT_STAR_DELTA = "120"
+JUYA_RSS_URL = "https://daily.juya.uk/rss.xml"
+JUYA_CONTENT_LIMIT = "30000"
+ALLOW_QUERY_RUN_SECRET = "true"
+ALLOW_TEST_RECIPIENT_OVERRIDE = "true"
+
+[[kv_namespaces]]
+binding = "STATE"
+id = "<KV_NAMESPACE_ID>"
+
+[[queues.producers]]
+binding = "DIGEST_QUEUE"
+queue = "github-digest-jobs"
+
+[[send_email]]
+name = "EMAIL_OUT"
+allowed_destination_addresses = ["recipient-primary@example.com", "recipient-secondary@example.com", "test-recipient@example.com"]
+allowed_sender_addresses = ["digest@example.com"]

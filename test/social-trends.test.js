@@ -1,0 +1,141 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  buildDomesticTrendingSection,
+  translateExternalSocialPlatforms,
+} from "../index.js";
+
+test("translates HN and Reddit titles while preserving clickable URLs", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalConsoleLog = console.log;
+  let requestBody;
+  const usageLogs = [];
+  globalThis.fetch = async (_url, init) => {
+    requestBody = JSON.parse(init.body);
+    return new Response(JSON.stringify({
+      choices: [
+        {
+          message: {
+            content: JSON.stringify({
+              items: [
+                {
+                  key: "hacker-news:0",
+                  title_cn: "Claude Code 现已支持长期运行的后台任务和移动通知",
+                },
+                {
+                  key: "reddit-ai:0",
+                  title_cn: "我用本地 LLM 构建了一个可以读完整代码库的代理",
+                },
+              ],
+            }),
+          },
+        },
+      ],
+      usage: {
+        prompt_tokens: 210,
+        completion_tokens: 88,
+        total_tokens: 298,
+      },
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  console.log = (...args) => usageLogs.push(args.join(" "));
+
+  try {
+    const platforms = await translateExternalSocialPlatforms({
+      DEEPSEEK_API_KEY: "test-key",
+      DEEPSEEK_THINKING: "enabled",
+    }, [
+      {
+        id: "hacker-news",
+        label: "Hacker News",
+        items: [
+          {
+            title: "Claude Code now supports long-running background tasks and mobile notifications",
+            url: "https://news.ycombinator.com/item?id=123",
+            platform: "hacker-news",
+          },
+        ],
+      },
+      {
+        id: "reddit-ai",
+        label: "Reddit AI",
+        items: [
+          {
+            title: "I built a local LLM agent that can read an entire codebase",
+            url: "https://old.reddit.com/r/LocalLLaMA/comments/example",
+            platform: "reddit-ai",
+          },
+        ],
+      },
+    ]);
+
+    assert.equal(platforms[0].items[0].title, "Claude Code 现已支持长期运行的后台任务和移动通知");
+    assert.equal(platforms[0].items[0].title_original, "Claude Code now supports long-running background tasks and mobile notifications");
+    assert.equal(platforms[0].items[0].url, "https://news.ycombinator.com/item?id=123");
+    assert.equal(platforms[1].items[0].title, "我用本地 LLM 构建了一个可以读完整代码库的代理");
+    assert.equal(requestBody.model, "deepseek-v4-flash");
+    assert.deepEqual(requestBody.thinking, { type: "disabled" });
+    assert.equal(requestBody.reasoning_effort, undefined);
+    assert.equal(requestBody.temperature, 0.2);
+    assert.ok(usageLogs.some((line) => line.includes("purpose=social_translation") && line.includes("total_tokens=298")));
+
+    const html = buildDomesticTrendingSection(platforms);
+    assert.match(html, /href="https:\/\/news\.ycombinator\.com\/item\?id=123"/);
+    assert.match(html, /href="https:\/\/old\.reddit\.com\/r\/LocalLLaMA\/comments\/example"/);
+    assert.match(html, /Claude Code 现已支持长期运行的后台任务和移动通知/);
+    assert.doesNotMatch(html, /…/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    console.log = originalConsoleLog;
+  }
+});
+
+test("falls back to localized HN and Reddit titles when translation API fails", async () => {
+  const originalFetch = globalThis.fetch;
+  let requestCount = 0;
+  globalThis.fetch = async () => {
+    requestCount += 1;
+    return new Response("rate limited", { status: 429 });
+  };
+
+  try {
+    const platforms = await translateExternalSocialPlatforms({
+      DEEPSEEK_API_KEY: "test-key",
+      DEEPSEEK_THINKING: "disabled",
+    }, [
+      {
+        id: "hacker-news",
+        label: "Hacker News",
+        items: [
+          {
+            title: "Zero-Touch OAuth for MCP",
+            url: "https://blog.modelcontextprotocol.io/posts/enterprise-managed-auth/",
+            platform: "hacker-news",
+          },
+        ],
+      },
+      {
+        id: "reddit-ai",
+        label: "Reddit AI",
+        items: [
+          {
+            title: "What's more impressive, GLM 5.1 -> 5.2 or Qwen 3.5 -> 3.6?",
+            url: "https://old.reddit.com/r/LocalLLaMA/comments/example",
+            platform: "reddit-ai",
+          },
+        ],
+      },
+    ]);
+
+    assert.equal(platforms[0].items[0].title, "MCP 的零接触 OAuth");
+    assert.match(platforms[1].items[0].title, /哪个更有看点/);
+    assert.equal(platforms[0].items[0].url, "https://blog.modelcontextprotocol.io/posts/enterprise-managed-auth/");
+    assert.equal(requestCount, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

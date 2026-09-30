@@ -1,0 +1,11 @@
+[Unit]
+Description=Run GitHub AI digest mailer daily
+
+[Timer]
+# Start at 03:35 UTC, stop model work at 03:59, and hold delivery until 04:00 UTC (12:00 Asia/Hong_Kong).
+OnCalendar=*-*-* 03:35:00
+Persistent=true
+Unit=github-digest.service
+
+[Install]
+WantedBy=timers.target

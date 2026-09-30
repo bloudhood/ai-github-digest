@@ -1,0 +1,14 @@
+.wrangler/
+node_modules/
+.claude/
+*.local.toml
+.dev.vars
+.env
+.env.*
+!.env.server.example
+dist/
+coverage/
+data/
+logs/
+migration-state/
+index.js.bak-*
